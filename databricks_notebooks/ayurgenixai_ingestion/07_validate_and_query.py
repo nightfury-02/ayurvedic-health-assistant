@@ -54,3 +54,24 @@ spark.sql(
     ORDER BY source_type
     """
 ).show()
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT 
+# MAGIC   MAX(length(text_chunk)) as max_len, 
+# MAGIC   MIN(length(text_chunk)) as min_len, 
+# MAGIC   AVG(length(text_chunk)) as avg_len
+# MAGIC FROM bricksiitm.ayurgenix.knowledge_base
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT source_type, COUNT(*) 
+# MAGIC FROM bricksiitm.ayurgenix.knowledge_base
+# MAGIC GROUP BY source_type;
+
+# COMMAND ----------
+
+
