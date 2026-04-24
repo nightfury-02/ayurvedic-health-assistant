@@ -83,6 +83,22 @@ def extract_pdf_pages_with_pdfplumber(local_path: str, file_name: str) -> List[D
             )
     return records
 
+
+def discover_files(path: str):
+    try:
+        listed = dbutils.fs.ls(path)
+        return [f.path for f in listed if not f.isDir()]
+    except Exception as exc:
+        print(f"dbutils.fs.ls failed for {path}. Falling back to Spark listing. Error: {str(exc)}")
+        files_df = (
+            spark.read.format("binaryFile")
+            .option("recursiveFileLookup", "true")
+            .load(path)
+            .select(F.col("path"))
+            .distinct()
+        )
+        return [r.path for r in files_df.collect()]
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -90,8 +106,8 @@ def extract_pdf_pages_with_pdfplumber(local_path: str, file_name: str) -> List[D
 
 # COMMAND ----------
 
-all_files = dbutils.fs.ls(RAW_DATA_PATH)
-pdf_files = [f.path for f in all_files if (not f.isDir()) and f.path.lower().endswith(".pdf")]
+all_files = discover_files(RAW_DATA_PATH)
+pdf_files = [p for p in all_files if p.lower().endswith(".pdf")]
 
 if not pdf_files:
     raise FileNotFoundError(f"No PDF files found in {RAW_DATA_PATH}")

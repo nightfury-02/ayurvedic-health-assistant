@@ -5,25 +5,38 @@
 
 # COMMAND ----------
 
-from pyspark.sql.utils import AnalysisException
+from pyspark.sql import functions as F
 
 RAW_DATA_PATH = "/Volumes/bricksiitm/ayurgenix/files/raw_data/"
 
 
-def safe_ls(path: str):
+def discover_files(path: str):
+    """
+    Discover files from a Unity Catalog volume path.
+    Tries dbutils.fs.ls first, then falls back to Spark binaryFile listing.
+    """
     try:
-        return dbutils.fs.ls(path)
-    except AnalysisException as exc:
-        raise FileNotFoundError(f"Path does not exist or is inaccessible: {path}") from exc
+        listed = dbutils.fs.ls(path)
+        return [f.path for f in listed if not f.isDir()]
     except Exception as exc:
-        raise RuntimeError(f"Failed to list files in {path}") from exc
+        print(f"dbutils.fs.ls failed for {path}. Falling back to Spark listing. Error: {str(exc)}")
+        try:
+            files_df = (
+                spark.read.format("binaryFile")
+                .option("recursiveFileLookup", "true")
+                .load(path)
+                .select(F.col("path"))
+                .distinct()
+            )
+            return [r.path for r in files_df.collect()]
+        except Exception as fallback_exc:
+            raise RuntimeError(f"Failed to list files in {path}") from fallback_exc
 
 
-files = safe_ls(RAW_DATA_PATH)
-if not files:
+all_paths = discover_files(RAW_DATA_PATH)
+if not all_paths:
     raise ValueError(f"No files found in {RAW_DATA_PATH}")
 
-all_paths = [f.path for f in files if not f.isDir()]
 csv_paths = [p for p in all_paths if p.lower().endswith(".csv")]
 pdf_paths = [p for p in all_paths if p.lower().endswith(".pdf")]
 
