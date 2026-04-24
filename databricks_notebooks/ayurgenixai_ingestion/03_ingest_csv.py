@@ -79,6 +79,7 @@ for f in csv_files:
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 6
 raw_csv_df = (
     spark.read.option("header", True)
     .option("multiLine", True)
@@ -97,7 +98,7 @@ kv_exprs = [
 ]
 
 csv_text_df = (
-    raw_csv_df.withColumn("source_file", F.input_file_name())
+    raw_csv_df.withColumn("source_file", F.col("_metadata.file_path"))
     .withColumn("combined_text", F.concat_ws(" | ", *kv_exprs))
     .withColumn("combined_text", F.regexp_replace(F.col("combined_text"), r"\s+", " "))
     .withColumn("text_chunk_array", chunker_udf(F.col("combined_text")))
@@ -148,3 +149,7 @@ if csv_chunks_df.count() == 0:
 
 print(f"Saved CSV staging table: {CSV_STAGING_TABLE}")
 display(csv_chunks_df.limit(10))
+
+# COMMAND ----------
+
+

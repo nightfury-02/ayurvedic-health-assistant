@@ -17,6 +17,7 @@
 
 # COMMAND ----------
 
+from io import BytesIO
 from typing import List, Dict
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -50,11 +51,26 @@ def text_chunker(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_O
     return chunks
 
 
-def extract_pdf_pages_with_fitz(local_path: str, file_name: str) -> List[Dict]:
+def read_pdf_bytes(pdf_path: str) -> bytes:
+    """
+    Read PDF content from a UC Volume path without using local filesystem copies.
+    """
+    row = (
+        spark.read.format("binaryFile")
+        .load(pdf_path)
+        .select("content")
+        .first()
+    )
+    if row is None or row["content"] is None:
+        raise ValueError(f"No binary content returned for {pdf_path}")
+    return bytes(row["content"])
+
+
+def extract_pdf_pages_with_fitz(pdf_bytes: bytes, file_name: str) -> List[Dict]:
     import fitz
 
     records = []
-    with fitz.open(local_path) as doc:
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for idx, page in enumerate(doc, start=1):
             txt = page.get_text("text") or ""
             records.append(
@@ -67,11 +83,11 @@ def extract_pdf_pages_with_fitz(local_path: str, file_name: str) -> List[Dict]:
     return records
 
 
-def extract_pdf_pages_with_pdfplumber(local_path: str, file_name: str) -> List[Dict]:
+def extract_pdf_pages_with_pdfplumber(pdf_bytes: bytes, file_name: str) -> List[Dict]:
     import pdfplumber
 
     records = []
-    with pdfplumber.open(local_path) as pdf:
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         for idx, page in enumerate(pdf.pages, start=1):
             txt = page.extract_text() or ""
             records.append(
@@ -128,19 +144,18 @@ failed_files = []
 
 for pdf_path in pdf_files:
     file_name = pdf_path.split("/")[-1]
-    local_copy = f"/tmp/{file_name}"
     try:
-        dbutils.fs.cp(pdf_path, f"file:{local_copy}", recurse=False)
+        pdf_bytes = read_pdf_bytes(pdf_path)
     except Exception as exc:
-        failed_files.append((pdf_path, f"copy_failed: {str(exc)}"))
+        failed_files.append((pdf_path, f"read_failed: {str(exc)}"))
         continue
 
     page_records = []
     try:
-        page_records = extract_pdf_pages_with_fitz(local_copy, file_name)
+        page_records = extract_pdf_pages_with_fitz(pdf_bytes, file_name)
     except Exception:
         try:
-            page_records = extract_pdf_pages_with_pdfplumber(local_copy, file_name)
+            page_records = extract_pdf_pages_with_pdfplumber(pdf_bytes, file_name)
         except Exception as exc:
             failed_files.append((pdf_path, f"extract_failed: {str(exc)}"))
             page_records = []
@@ -218,3 +233,7 @@ if pdf_chunks_df.count() == 0:
 
 print(f"Saved PDF staging table: {PDF_STAGING_TABLE}")
 display(pdf_chunks_df.limit(10))
+
+# COMMAND ----------
+
+print(f"Total rows in pdf_chunks_df: {pdf_chunks_df.count()}")

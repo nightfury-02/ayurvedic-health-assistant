@@ -24,3 +24,7 @@ if unified_df.count() == 0:
 )
 
 print(f"Saved final Delta table: {FINAL_TABLE}")
+
+# COMMAND ----------
+
+

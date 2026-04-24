@@ -68,3 +68,7 @@ for p in csv_paths:
 
 for p in pdf_paths:
     print(p)
+
+# COMMAND ----------
+
+

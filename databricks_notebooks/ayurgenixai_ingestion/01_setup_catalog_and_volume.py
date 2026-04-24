@@ -33,3 +33,7 @@ print(f"Volume ready: {CATALOG}.{SCHEMA}.{VOLUME}")
 
 RAW_DATA_PATH = "/Volumes/bricksiitm/ayurgenix/files/raw_data/"
 print(f"Raw data path configured: {RAW_DATA_PATH}")
+
+# COMMAND ----------
+
+
