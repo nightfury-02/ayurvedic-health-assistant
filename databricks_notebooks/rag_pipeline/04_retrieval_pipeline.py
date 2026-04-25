@@ -101,4 +101,42 @@ print(index.describe())
 
 # COMMAND ----------
 
+# DBTITLE 1,Monitor index sync progress
+from databricks.vector_search.client import VectorSearchClient
+import time
+
+vsc = VectorSearchClient()
+
+print(f"Monitoring index: {VECTOR_INDEX_NAME}")
+print(f"Expected row count: 446\n")
+print("=" * 80)
+
+# Get current status
+index = vsc.get_index(
+    endpoint_name=VECTOR_ENDPOINT_NAME,
+    index_name=VECTOR_INDEX_NAME
+)
+
+status = index.describe()['status']
+
+print(f"\n📊 Current Status:")
+print(f"  State: {status['detailed_state']}")
+print(f"  Ready: {status['ready']}")
+print(f"  Indexed Rows: {status.get('indexed_row_count', 0)} / 446")
+print(f"  Message: {status.get('message', 'N/A')}")
+
+if status['ready']:
+    print("\n✅ Index is ONLINE and ready for queries!")
+else:
+    print("\n⏳ Index is still provisioning. Re-run this cell to check progress.")
+    print("\nStage progression:")
+    print("  1. PROVISIONING_ENDPOINT (endpoint setup)")
+    print("  2. PROVISIONING_PIPELINE_RESOURCES (pipeline setup) ← Check here")
+    print("  3. SYNCING (data ingestion - row count increases)")
+    print("  4. ONLINE (ready for queries)")
+
+print("\n" + "=" * 80)
+
+# COMMAND ----------
+
 
