@@ -74,17 +74,22 @@ try:
     if VECTOR_INDEX_NAME not in index_names:
         print(f"Creating index: {VECTOR_INDEX_NAME}")
 
-        vsc.create_delta_sync_index(
-            endpoint_name=VECTOR_ENDPOINT_NAME,
-            index_name=VECTOR_INDEX_NAME,
-            source_table_name=EMBEDDINGS_TABLE,
-            pipeline_type="TRIGGERED",
-            primary_key=PRIMARY_KEY,
-            embedding_dimension=EMBEDDING_DIMENSION,
-            embedding_vector_column=EMBEDDING_COLUMN,
-        )
-
-        print("Index creation triggered. It may take a few minutes...")
+        try:
+            vsc.create_delta_sync_index(
+                endpoint_name=VECTOR_ENDPOINT_NAME,
+                index_name=VECTOR_INDEX_NAME,
+                source_table_name=EMBEDDINGS_TABLE,
+                pipeline_type="TRIGGERED",
+                primary_key=PRIMARY_KEY,
+                embedding_dimension=EMBEDDING_DIMENSION,
+                embedding_vector_column=EMBEDDING_COLUMN,
+            )
+            print("Index creation triggered. It may take a few minutes...")
+        except Exception as create_exc:
+            if "already exists" in str(create_exc):
+                print(f"Index already exists: {VECTOR_INDEX_NAME}")
+            else:
+                raise
 
     else:
         print(f"Index already exists: {VECTOR_INDEX_NAME}")

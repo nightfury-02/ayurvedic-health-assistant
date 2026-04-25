@@ -10,6 +10,12 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Install Vector Search package
+# MAGIC %pip install databricks-vectorsearch
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 CATALOG = "bricksiitm"
 SCHEMA = "ayurgenix"
 
@@ -51,12 +57,6 @@ if not query_embedding:
 
 # MAGIC %md
 # MAGIC ## Retrieve similar chunks
-
-# COMMAND ----------
-
-# DBTITLE 1,Install Vector Search package
-# MAGIC %pip install databricks-vectorsearch
-# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
