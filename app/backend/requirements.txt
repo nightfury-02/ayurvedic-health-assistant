@@ -1,0 +1,9 @@
+streamlit>=1.36,<2.0
+requests>=2.31,<3.0
+
+# Required by backend/rag_core.py for the in-process Direct mode.
+# (Remote API mode does not need these on the Streamlit side.)
+databricks-sdk>=0.30,<1.0
+databricks-vectorsearch>=0.40,<1.0
+openai>=1.40,<2.0
+numpy>=1.26,<3.0

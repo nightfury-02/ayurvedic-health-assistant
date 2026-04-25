@@ -17,10 +17,10 @@
 
 # COMMAND ----------
 
+
 from io import BytesIO
 from typing import List, Dict
 from pyspark.sql import functions as F
-from pyspark.sql.window import Window
 import importlib.util
 import os
 
@@ -113,12 +113,35 @@ def extract_pdf_pages_with_pdfplumber(pdf_bytes: bytes, file_name: str) -> List[
     return records
 
 
+def _looks_like_missing_path(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return any(
+        n in text
+        for n in (
+            "CloudFileNotFoundException",
+            "Path does not exist",
+            "No such file or directory",
+            "FileNotFoundException",
+        )
+    )
+
+
 def discover_files(path: str):
+    placeholder_suffix = "/.placeholder"
     try:
         listed = dbutils.fs.ls(path)
-        return [f.path for f in listed if not f.isDir()]
+        return [
+            f.path for f in listed
+            if not f.isDir() and not f.path.endswith(placeholder_suffix)
+        ]
     except Exception as exc:
-        print(f"dbutils.fs.ls failed for {path}. Falling back to Spark listing. Error: {str(exc)}")
+        if _looks_like_missing_path(exc):
+            raise FileNotFoundError(
+                f"Raw data directory does not exist: {path}\n"
+                "Run notebook 01_setup_catalog_and_volume.py and upload the "
+                "raw PDF files into that path before running this notebook."
+            ) from exc
+        print(f"dbutils.fs.ls failed for {path}. Falling back to Spark listing. Error: {exc}")
         files_df = (
             spark.read.format("binaryFile")
             .option("recursiveFileLookup", "true")
@@ -126,7 +149,10 @@ def discover_files(path: str):
             .select(F.col("path"))
             .distinct()
         )
-        return [r.path for r in files_df.collect()]
+        return [
+            r.path for r in files_df.collect()
+            if not r.path.endswith(placeholder_suffix)
+        ]
 
 # COMMAND ----------
 
@@ -139,7 +165,10 @@ all_files = discover_files(RAW_DATA_PATH)
 pdf_files = [p for p in all_files if p.lower().endswith(".pdf")]
 
 if not pdf_files:
-    raise FileNotFoundError(f"No PDF files found in {RAW_DATA_PATH}")
+    raise FileNotFoundError(
+        f"No PDF files found in {RAW_DATA_PATH}. Upload at least one .pdf "
+        "file (Catalog Explorer ▸ Volumes ▸ files ▸ raw_data ▸ Upload)."
+    )
 
 print("PDF files to ingest:")
 for p in pdf_files:
@@ -213,34 +242,54 @@ pdf_docs_df = spark.createDataFrame(extracted_rows)
 
 # COMMAND ----------
 
+
 chunker_udf = F.udf(text_chunker, "array<string>")
 
 chunked_df = (
     pdf_docs_df.withColumn("clean_text", F.regexp_replace(F.col("document_text"), r"\s+", " "))
     .withColumn("text_chunk_array", chunker_udf(F.col("clean_text")))
-    .withColumn("text_chunk", F.explode_outer(F.col("text_chunk_array")))
+    .select(
+        "*",
+        F.posexplode_outer(F.col("text_chunk_array")).alias(
+            "chunk_index_in_doc", "text_chunk"
+        ),
+    )
     .filter(F.col("text_chunk").isNotNull() & (F.length(F.col("text_chunk")) > 0))
     .withColumn("source_type", F.lit("pdf"))
 )
 
-window_spec = Window.orderBy(F.monotonically_increasing_id())
+# Deterministic, parallel-friendly chunk_id. Avoids `row_number()` over a
+# global (un-partitioned) window, which forces all rows into a single
+# partition and triggers the Spark "No Partition Defined for Window" warning.
 pdf_chunks_df = (
-    chunked_df.withColumn("chunk_id", F.row_number().over(window_spec))
+    chunked_df.withColumn(
+        "chunk_id",
+        F.sha2(
+            F.concat_ws(
+                "||",
+                F.coalesce(F.col("file_name"), F.lit("unknown_file")),
+                F.col("chunk_index_in_doc").cast("string"),
+                F.col("text_chunk"),
+            ),
+            256,
+        ),
+    )
     .withColumn(
         "metadata",
         F.to_json(
             F.struct(
                 F.col("file_name"),
-                    F.col("page_count"),
-                    F.lit("pdf_document").alias("record_type")
+                F.col("page_count"),
+                F.lit("pdf_document").alias("record_type"),
+                F.col("chunk_index_in_doc").alias("chunk_index"),
             )
-        )
+        ),
     )
     .select(
-        F.col("chunk_id").cast("string").alias("id"),
+        F.col("chunk_id").alias("id"),
         "text_chunk",
         "source_type",
-        "metadata"
+        "metadata",
     )
 )
 
@@ -254,6 +303,7 @@ if pdf_chunks_df.count() == 0:
 
 # COMMAND ----------
 
+
 (
     pdf_chunks_df.write.format("delta")
     .mode("overwrite")
@@ -263,6 +313,8 @@ if pdf_chunks_df.count() == 0:
 
 print(f"Saved PDF staging table: {PDF_STAGING_TABLE}")
 display(pdf_chunks_df.limit(10))
+
+
 
 # COMMAND ----------
 

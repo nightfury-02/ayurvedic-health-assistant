@@ -1,1 +1,5 @@
-streamlit
+# The Streamlit app's dependencies live in app/requirements.txt because
+# Databricks Apps deploys the `app/` folder and looks for a requirements
+# file alongside `app.yaml`. This top-level file just re-exports them so
+# `pip install -r requirements.txt` works from the repo root for local dev.
+-r app/requirements.txt

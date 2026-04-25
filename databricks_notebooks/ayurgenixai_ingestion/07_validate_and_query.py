@@ -7,7 +7,11 @@
 
 from pyspark.sql import functions as F
 
-FINAL_TABLE = "bricksiitm.ayurgenix.knowledge_base"
+CATALOG = "bricksiitm"
+SCHEMA = "ayurgenix"
+FINAL_TABLE = f"{CATALOG}.{SCHEMA}.knowledge_base"
+
+# COMMAND ----------
 
 df = spark.table(FINAL_TABLE)
 
@@ -16,6 +20,7 @@ if row_count == 0:
     raise ValueError(f"Table {FINAL_TABLE} exists but has zero rows.")
 
 print(f"Total rows in {FINAL_TABLE}: {row_count}")
+print(f"Schema: {df.columns}")
 
 # COMMAND ----------
 
@@ -41,6 +46,17 @@ display(
 
 # COMMAND ----------
 
+display(
+    df.select(
+        F.max(F.length("chunk_text")).alias("max_len"),
+        F.min(F.length("chunk_text")).alias("min_len"),
+        F.avg(F.length("chunk_text")).cast("int").alias("avg_len"),
+        F.expr("percentile_approx(length(chunk_text), 0.5)").alias("median_len"),
+    )
+)
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Quick SQL checks
 
@@ -57,21 +73,15 @@ spark.sql(
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC SELECT 
-# MAGIC   MAX(length(text_chunk)) as max_len, 
-# MAGIC   MIN(length(text_chunk)) as min_len, 
-# MAGIC   AVG(length(text_chunk)) as avg_len
-# MAGIC FROM bricksiitm.ayurgenix.knowledge_base
-# MAGIC
+spark.sql(
+    f"""
+    SELECT
+      MAX(length(chunk_text)) AS max_len,
+      MIN(length(chunk_text)) AS min_len,
+      AVG(length(chunk_text)) AS avg_len
+    FROM {FINAL_TABLE}
+    """
+).show()
 
 # COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT source_type, COUNT(*) 
-# MAGIC FROM bricksiitm.ayurgenix.knowledge_base
-# MAGIC GROUP BY source_type;
-
-# COMMAND ----------
-
 

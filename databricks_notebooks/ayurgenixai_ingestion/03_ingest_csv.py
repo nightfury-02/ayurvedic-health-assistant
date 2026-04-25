@@ -6,7 +6,6 @@
 # COMMAND ----------
 
 from pyspark.sql import functions as F
-from pyspark.sql.window import Window
 import importlib.util
 import os
 
@@ -45,9 +44,9 @@ chunk_text_by_words = _import_shared_chunker()
 
 
 def text_chunker(text: str):
-    # For CSV rows, we treat the entire row (all columns combined) as a single chunk.
-    # Splitting structured rows causes column context to be lost in retrieval.
-    return [text]
+    return chunk_text_by_words(
+        text, chunk_size_words=CHUNK_SIZE_WORDS, overlap_words=CHUNK_OVERLAP_WORDS
+    )
 
 
 chunker_udf = F.udf(text_chunker, "array<string>")
@@ -59,12 +58,35 @@ chunker_udf = F.udf(text_chunker, "array<string>")
 
 # COMMAND ----------
 
+def _looks_like_missing_path(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return any(
+        n in text
+        for n in (
+            "CloudFileNotFoundException",
+            "Path does not exist",
+            "No such file or directory",
+            "FileNotFoundException",
+        )
+    )
+
+
 def discover_files(path: str):
+    placeholder_suffix = "/.placeholder"
     try:
         listed = dbutils.fs.ls(path)
-        return [f.path for f in listed if not f.isDir()]
+        return [
+            f.path for f in listed
+            if not f.isDir() and not f.path.endswith(placeholder_suffix)
+        ]
     except Exception as exc:
-        print(f"dbutils.fs.ls failed for {path}. Falling back to Spark listing. Error: {str(exc)}")
+        if _looks_like_missing_path(exc):
+            raise FileNotFoundError(
+                f"Raw data directory does not exist: {path}\n"
+                "Run notebook 01_setup_catalog_and_volume.py and upload the "
+                "raw CSV/PDF files into that path before running this notebook."
+            ) from exc
+        print(f"dbutils.fs.ls failed for {path}. Falling back to Spark listing. Error: {exc}")
         files_df = (
             spark.read.format("binaryFile")
             .option("recursiveFileLookup", "true")
@@ -72,14 +94,20 @@ def discover_files(path: str):
             .select(F.col("path"))
             .distinct()
         )
-        return [r.path for r in files_df.collect()]
+        return [
+            r.path for r in files_df.collect()
+            if not r.path.endswith(placeholder_suffix)
+        ]
 
 
 all_files = discover_files(RAW_DATA_PATH)
 csv_files = [p for p in all_files if p.lower().endswith(".csv")]
 
 if not csv_files:
-    raise FileNotFoundError(f"No CSV files found in {RAW_DATA_PATH}")
+    raise FileNotFoundError(
+        f"No CSV files found in {RAW_DATA_PATH}. Upload at least one .csv "
+        "file (Catalog Explorer ▸ Volumes ▸ files ▸ raw_data ▸ Upload)."
+    )
 
 print("CSV files to ingest:")
 for f in csv_files:
@@ -119,32 +147,52 @@ csv_text_df = (
 )
 
 exploded_df = (
-    csv_text_df.withColumn("text_chunk", F.explode_outer(F.col("text_chunk_array")))
+    csv_text_df.select(
+        "*",
+        F.posexplode_outer(F.col("text_chunk_array")).alias(
+            "chunk_index_in_row", "text_chunk"
+        ),
+    )
     .filter(F.col("text_chunk").isNotNull() & (F.length(F.col("text_chunk")) > 0))
 )
 
-window_spec = Window.orderBy(F.monotonically_increasing_id())
+# Deterministic, parallel-friendly chunk_id. Avoids `row_number()` over a
+# global (un-partitioned) window, which forces all rows into a single
+# partition and triggers the Spark "No Partition Defined for Window" warning.
 csv_chunks_df = (
-    exploded_df.withColumn("chunk_id", F.row_number().over(window_spec))
+    exploded_df.withColumn(
+        "chunk_id",
+        F.sha2(
+            F.concat_ws(
+                "||",
+                F.coalesce(F.col("source_file"), F.lit("unknown_file")),
+                F.col("chunk_index_in_row").cast("string"),
+                F.col("text_chunk"),
+            ),
+            256,
+        ),
+    )
     .withColumn(
         "metadata",
         F.to_json(
             F.struct(
                 F.col("source_file").alias("file_name"),
-                F.lit("csv_row").alias("record_type")
+                F.lit("csv_row").alias("record_type"),
+                F.col("chunk_index_in_row").alias("chunk_index"),
             )
-        )
+        ),
     )
     .select(
-        F.col("chunk_id").cast("string").alias("id"),
+        F.col("chunk_id").alias("id"),
         "text_chunk",
         "source_type",
-        "metadata"
+        "metadata",
     )
 )
 
 if csv_chunks_df.count() == 0:
     raise ValueError("No non-empty text chunks were generated from CSV data.")
+
 
 # COMMAND ----------
 
@@ -164,5 +212,4 @@ print(f"Saved CSV staging table: {CSV_STAGING_TABLE}")
 display(csv_chunks_df.limit(10))
 
 # COMMAND ----------
-
 

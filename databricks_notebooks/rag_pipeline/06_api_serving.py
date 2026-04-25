@@ -2,29 +2,94 @@
 # MAGIC %md
 # MAGIC # 06 - API Serving (FastAPI)
 # MAGIC
-# MAGIC This notebook shows a production-friendly FastAPI app for RAG serving.
-# MAGIC Endpoint:
-# MAGIC - `POST /ask`
-# MAGIC - Input: `{"question": "...", "top_k": 5}`
-# MAGIC - Output: `{"answer": "...", "sources": [...]}`.
+# MAGIC Production-leaning FastAPI app for RAG serving:
+# MAGIC - Direct embedding via the serving endpoint (no per-request Spark job)
+# MAGIC - Hybrid retrieval (vector + keyword) with MMR re-ranking
+# MAGIC - Manifest-based row decoding (no fragile positional access)
+# MAGIC - System prompt + medical safety preamble
+# MAGIC - Red-flag symptom guard
+# MAGIC - Per-request timeout and structured error responses
+# MAGIC
+# MAGIC Endpoints:
+# MAGIC - `GET /health`
+# MAGIC - `POST /ask`  body: `{"question": "...", "top_k": 5, "source_filter": "csv|pdf|null"}`
 
 # COMMAND ----------
 
-# MAGIC %pip install fastapi uvicorn databricks-sdk databricks-vectorsearch requests
+# MAGIC %pip install fastapi uvicorn databricks-sdk databricks-vectorsearch openai numpy
 
 # COMMAND ----------
 
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+import importlib.util
+import logging
+import math
 import os
-import time
-from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from typing import Any, Dict, List, Literal, Optional
 
-import requests
+import numpy as np
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from databricks.sdk import WorkspaceClient
 from databricks.vector_search.client import VectorSearchClient
+
+
+def _import_language_utils():
+    """Locate and import the shared ``language_utils`` module."""
+    try:
+        from databricks_notebooks.rag_pipeline.language_utils import (  # noqa: WPS433
+            DetectedLanguage,
+            SUPPORTED_LANGUAGES,
+            build_translate_messages,
+            detect_language,
+            resolve_language,
+        )
+        return {
+            "DetectedLanguage": DetectedLanguage,
+            "SUPPORTED_LANGUAGES": SUPPORTED_LANGUAGES,
+            "build_translate_messages": build_translate_messages,
+            "detect_language": detect_language,
+            "resolve_language": resolve_language,
+        }
+    except Exception:  # noqa: BLE001
+        current = os.getcwd()
+        while True:
+            candidate = os.path.join(
+                current, "databricks_notebooks", "rag_pipeline", "language_utils.py"
+            )
+            if os.path.exists(candidate):
+                spec = importlib.util.spec_from_file_location("language_utils", candidate)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)  # type: ignore[union-attr]
+                return {
+                    "DetectedLanguage": module.DetectedLanguage,
+                    "SUPPORTED_LANGUAGES": module.SUPPORTED_LANGUAGES,
+                    "build_translate_messages": module.build_translate_messages,
+                    "detect_language": module.detect_language,
+                    "resolve_language": module.resolve_language,
+                }
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        raise ImportError("Unable to locate shared language_utils.py")
+
+
+_lang = _import_language_utils()
+DetectedLanguage = _lang["DetectedLanguage"]
+SUPPORTED_LANGUAGES = _lang["SUPPORTED_LANGUAGES"]
+build_translate_messages = _lang["build_translate_messages"]
+detect_language = _lang["detect_language"]
+resolve_language = _lang["resolve_language"]
+
+# ---- Configuration ----------------------------------------------------------
 
 CATALOG = "bricksiitm"
 SCHEMA = "ayurgenix"
@@ -33,317 +98,495 @@ VECTOR_ENDPOINT_NAME = "ayurgenix-vs-endpoint"
 VECTOR_INDEX_NAME = f"{CATALOG}.{SCHEMA}.knowledge_base_embeddings_index"
 EMBEDDING_ENDPOINT = "databricks-gte-large-en"
 LLM_ENDPOINT = "databricks-meta-llama-3-3-70b-instruct"
-MAX_CONTEXT_CHARS = 5000
 
-SARVAM_API_URL = os.getenv("SARVAM_API_URL", "https://api.sarvam.ai/translate")
-SARVAM_API_KEY = dbutils.secrets.get(
-    scope="ayurgenix-scope",
-    key="sarvam_api_key"
+DEFAULT_TOP_K = 5
+DEFAULT_FETCH_K = 20
+MMR_LAMBDA = 0.5
+USE_HYBRID = True
+
+REQUEST_TIMEOUT_S = 30  # hard ceiling per request stage
+
+ALLOWED_ORIGINS = ["*"]  # tighten to your Streamlit/app origin in production
+
+MEDICAL_DISCLAIMER = (
+    "This response summarizes traditional Ayurvedic guidance from the indexed "
+    "sources. It is not medical advice. Consult a qualified practitioner for "
+    "personal health decisions."
 )
 
+SYSTEM_PROMPT = (
+    "You are an Ayurveda knowledge assistant. Answer the user's question "
+    "using ONLY the provided context. Cite sources inline as "
+    "[source_file, page]. If the context is insufficient or off-topic, say "
+    "so explicitly instead of guessing. Do not provide diagnoses, dosages, "
+    "or treatment recommendations as medical advice; frame suggestions as "
+    "traditional Ayurvedic guidance and recommend consulting a qualified "
+    "practitioner for personal health decisions."
+)
 
-SUPPORTED_LANGS = {"en", "hi", "ta", "te"}
-LANG_NAME_TO_CODE = {
-    "english": "en",
-    "hindi": "hi",
-    "tamil": "ta",
-    "telugu": "te",
-}
+# Symptom phrases that should short-circuit to an emergency-care message.
+RED_FLAG_PATTERNS = [
+    r"\bchest pain\b",
+    r"\bdifficulty breathing\b|\bshortness of breath\b",
+    r"\bsuicid\w*\b|\bself.?harm\b",
+    r"\bsevere bleeding\b|\bheavy bleeding\b",
+    r"\bunconscious\b|\bfainting\b",
+    r"\bstroke\b|\bnumbness on one side\b|\bfacial droop\b",
+    r"\bpregnan\w+\b.*\b(bleed|pain|cramp)\w*\b",
+]
+_RED_FLAG_RE = re.compile("|".join(RED_FLAG_PATTERNS), re.IGNORECASE)
 
-app = FastAPI(title="AyurGenix RAG API", version="1.0.0")
+logger = logging.getLogger("ayurgenix.rag")
+logger.setLevel(logging.INFO)
 
+# ---- App --------------------------------------------------------------------
 
-class UserProfile(BaseModel):
-    age: Optional[str] = None
-    gender: Optional[str] = None
-    lifestyle: Optional[str] = None
-    stress_level: Optional[str] = None
-    diet: Optional[str] = None
-    sleep_quality: Optional[str] = None
-    physical_activity: Optional[str] = None
-    dietary_preference: Optional[str] = None
-    health_goal: Optional[str] = None
+app = FastAPI(title="AyurGenix RAG API", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+_executor = ThreadPoolExecutor(max_workers=8)
 
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=3)
-    top_k: int = Field(4, ge=1, le=20)
-    language: Optional[str] = Field(default=None, description="Preferred language code or name")
-    user_profile: Optional[UserProfile] = None
+    question: str = Field(..., min_length=3, max_length=2000)
+    top_k: int = Field(DEFAULT_TOP_K, ge=1, le=20)
+    source_filter: Optional[Literal["csv", "pdf"]] = None
+    # Optional ISO-like code (e.g. "te", "hi") or human name ("Telugu") for the
+    # response. If omitted the service auto-detects from the query script.
+    language: Optional[str] = Field(
+        default=None,
+        description=(
+            "Language code or name for the response. Leave null to auto-detect "
+            "from the query. Supported codes: "
+            + ", ".join(sorted(SUPPORTED_LANGUAGES.keys()))
+        ),
+    )
+
+
+class Source(BaseModel):
+    chunk_text: str
+    source_file: Optional[str] = None
+    page_number: Optional[int] = None
+    score: Optional[float] = None
 
 
 class AskResponse(BaseModel):
     answer: str
-    language: str
-    sources: List[Dict[str, Any]]
-    personalized_tips: List[str]
-    latency_ms: int
+    language: str = Field(..., description="Language code of the returned answer.")
+    detected_language: str = Field(
+        ..., description="Language code detected from the user's query."
+    )
+    disclaimer: str
+    sources: List[Source]
 
 
-def get_query_embedding(question: str):
-    safe_query = question.replace("'", "\\'")
-    row = spark.sql(
-        f"SELECT ai_query('{EMBEDDING_ENDPOINT}', '{safe_query}') AS embedding"
-    ).first()
-    embedding = row["embedding"] if row else None
-    if not embedding:
-        raise ValueError("Failed to generate query embedding.")
-    return embedding
+# ---- Helpers ----------------------------------------------------------------
 
-
-def normalize_lang_code(code: Optional[str]) -> str:
-    if not code:
-        return "en"
-    normalized = str(code).strip().lower()
-    return LANG_NAME_TO_CODE.get(normalized, normalized)
-
-
-def detect_language(text: str) -> str:
-    content = str(text or "")
-    if not content.strip():
-        return "en"
-
-    for ch in content:
-        codepoint = ord(ch)
-        if 0x0900 <= codepoint <= 0x097F:
-            return "hi"
-        if 0x0B80 <= codepoint <= 0x0BFF:
-            return "ta"
-        if 0x0C00 <= codepoint <= 0x0C7F:
-            return "te"
-    return "en"
-
-
-def _translate_with_sarvam(text: str, source_lang: str, target_lang: str) -> str:
-    if not text:
-        return text
-    if source_lang == target_lang:
-        return text
-    if not SARVAM_API_KEY:
-        print("[DEBUG][API] SARVAM_API_KEY missing. Translation fallback returns original text.")
-        return text
-
-    payload = {
-        "input": text,
-        "source_language_code": source_lang,
-        "target_language_code": target_lang,
-        "mode": "formal",
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "api-subscription-key": SARVAM_API_KEY,
-    }
+def _run_with_timeout(fn, *args, timeout: int = REQUEST_TIMEOUT_S, **kwargs):
+    future = _executor.submit(fn, *args, **kwargs)
     try:
-        response = requests.post(SARVAM_API_URL, json=payload, headers=headers, timeout=12)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("translated_text") or data.get("output") or data.get("translation") or text
-    except Exception as exc:
-        print(f"[DEBUG][API] Translation failed ({source_lang}->{target_lang}): {exc}")
-        return text
+        return future.result(timeout=timeout)
+    except FuturesTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(f"Operation exceeded {timeout}s timeout") from exc
 
 
-def translate_to_english(text: str, source_lang: str) -> str:
-    source_lang = normalize_lang_code(source_lang)
-    return _translate_with_sarvam(text, source_lang, "en")
+def _detect_red_flag(question: str) -> Optional[str]:
+    if _RED_FLAG_RE.search(question or ""):
+        return (
+            "Your question mentions symptoms that may require urgent medical "
+            "attention. Please contact local emergency services or a qualified "
+            "clinician immediately. This assistant cannot provide acute care "
+            "guidance."
+        )
+    return None
 
 
-def translate_to_user_lang(text: str, target_lang: str) -> str:
-    target_lang = normalize_lang_code(target_lang)
-    return _translate_with_sarvam(text, "en", target_lang)
+def embed_query(question: str) -> List[float]:
+    """Embed via the serving endpoint directly.
+
+    Foundation Model API embedding endpoints (e.g. ``databricks-gte-large-en``)
+    follow the OpenAI embeddings schema and expect ``input=[...]``. Legacy
+    MLflow-style endpoints expect ``inputs=[...]``. Try the FM-API form first
+    and fall back to the legacy form for compatibility.
+    """
+    if not question or not question.strip():
+        raise ValueError("Question is empty.")
+    w = WorkspaceClient()
+    last_exc: Optional[Exception] = None
+    resp = None
+    for kwargs in ({"input": [question]}, {"inputs": [question]}):
+        try:
+            resp = w.serving_endpoints.query(name=EMBEDDING_ENDPOINT, **kwargs)
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    if resp is None:
+        raise RuntimeError(
+            f"Embedding endpoint '{EMBEDDING_ENDPOINT}' rejected both "
+            f"'input' and 'inputs' payloads. Last error: {last_exc!s}"
+        )
+    data = resp.as_dict() if hasattr(resp, "as_dict") else dict(resp)
+    items = data.get("data") or data.get("predictions") or []
+    if not items:
+        raise RuntimeError("Embedding endpoint returned no data.")
+    first = items[0]
+    if isinstance(first, dict):
+        embedding = first.get("embedding") or first.get("vector") or first.get("output")
+    else:
+        embedding = first
+    if not embedding:
+        raise RuntimeError("Embedding endpoint returned an empty vector.")
+    return list(map(float, embedding))
 
 
-def retrieve(question: str, top_k: int) -> List[Dict[str, Any]]:
-    embedding = get_query_embedding(question)
+def decode_results(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result = response.get("result", {}) or {}
+    manifest_columns = (
+        result.get("manifest", {}).get("columns")
+        or response.get("manifest", {}).get("columns")
+        or []
+    )
+    column_names = [c.get("name") for c in manifest_columns if c.get("name")]
+    rows = result.get("data_array") or []
+    decoded: List[Dict[str, Any]] = []
+    for row in rows:
+        if column_names and len(row) == len(column_names):
+            item = dict(zip(column_names, row))
+        else:
+            item = {f"col_{i}": v for i, v in enumerate(row)}
+        for score_key in ("score", "_score", "similarity_score"):
+            if score_key in item and score_key != "score":
+                item["score"] = item.pop(score_key)
+                break
+        decoded.append(item)
+    return decoded
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    return 0.0 if denom == 0.0 else float(np.dot(a, b) / denom)
+
+
+def mmr_rerank(
+    candidates: List[Dict[str, Any]],
+    top_k: int,
+    lambda_: float = MMR_LAMBDA,
+) -> List[Dict[str, Any]]:
+    if not candidates or len(candidates) <= top_k:
+        return candidates
+    docs = [str(c.get("chunk_text", "")) for c in candidates]
+    vocab: Dict[str, int] = {}
+    for doc in docs:
+        for tok in doc.lower().split():
+            vocab.setdefault(tok, len(vocab))
+    if not vocab:
+        return candidates[:top_k]
+    bow = np.zeros((len(docs), len(vocab)), dtype=np.float32)
+    for i, doc in enumerate(docs):
+        for tok in doc.lower().split():
+            bow[i, vocab[tok]] += 1.0
+    relevance = np.array(
+        [float(c.get("score") or 0.0) for c in candidates], dtype=np.float32
+    )
+    if relevance.max() > 0:
+        relevance = relevance / relevance.max()
+    selected: List[int] = []
+    remaining = set(range(len(candidates)))
+    while remaining and len(selected) < top_k:
+        best_idx, best_score = -1, -math.inf
+        for i in remaining:
+            penalty = 0.0 if not selected else max(_cosine(bow[i], bow[j]) for j in selected)
+            score = lambda_ * float(relevance[i]) - (1 - lambda_) * penalty
+            if score > best_score:
+                best_score, best_idx = score, i
+        selected.append(best_idx)
+        remaining.remove(best_idx)
+    return [candidates[i] for i in selected]
+
+
+def retrieve(question: str, top_k: int, source_filter: Optional[str]) -> List[Dict[str, Any]]:
+    embedding = embed_query(question)
     vsc = VectorSearchClient()
     index = vsc.get_index(
         endpoint_name=VECTOR_ENDPOINT_NAME,
         index_name=VECTOR_INDEX_NAME,
     )
-    response = index.similarity_search(
+    search_kwargs: Dict[str, Any] = dict(
         query_vector=embedding,
-        columns=["chunk_text", "source_file", "page_number"],
-        num_results=top_k,
+        columns=["chunk_text", "source_file", "page_number", "source_type"],
+        num_results=DEFAULT_FETCH_K,
     )
-    rows = response.get("result", {}).get("data_array", [])
-    out = []
-    for r in rows:
-        out.append(
-            {
-                "chunk_text": r[0] if len(r) > 0 else "",
-                "source_file": r[1] if len(r) > 1 else None,
-                "page_number": r[2] if len(r) > 2 else None,
-                "score": r[-1] if len(r) > 0 else None,
-            }
-        )
-    print(f"[DEBUG][API] Retrieved {len(out)} contexts for question: {question}")
-    if out:
-        print(f"[DEBUG][API] Top context scores: {[c.get('score') for c in out[:5]]}")
-    return out
+    if source_filter:
+        search_kwargs["filters"] = {"source_type": source_filter}
+    if USE_HYBRID:
+        search_kwargs["query_text"] = question
+        search_kwargs["query_type"] = "HYBRID"
+
+    try:
+        response = index.similarity_search(**search_kwargs)
+    except Exception as exc:
+        if USE_HYBRID:
+            logger.warning("Hybrid search failed (%s); falling back to vector-only.", exc)
+            search_kwargs.pop("query_text", None)
+            search_kwargs.pop("query_type", None)
+            response = index.similarity_search(**search_kwargs)
+        else:
+            raise
+
+    candidates = decode_results(response)
+    return mmr_rerank(candidates, top_k=top_k)
 
 
-def build_personalized_tips(user_profile: Optional[UserProfile], answer_text: str) -> List[str]:
-    if not user_profile:
-        return []
-
-    tips: List[str] = []
-    stress = (user_profile.stress_level or "").strip().lower()
-    lifestyle = (user_profile.lifestyle or "").strip().lower()
-    diet_pref = (user_profile.dietary_preference or user_profile.diet or "").strip().lower()
-    sleep_quality = (user_profile.sleep_quality or "").strip().lower()
-    activity = (user_profile.physical_activity or "").strip().lower()
-    goal = (user_profile.health_goal or "").strip().lower()
-
-    if stress == "high":
-        tips.append("Stress is high: add 10-15 minutes of daily pranayama and evening digital detox.")
-    if sleep_quality in {"poor", "low"}:
-        tips.append("Sleep quality is low: prefer warm, light dinner and fixed bedtime before 10:30 PM.")
-    if "sedentary" in lifestyle or activity in {"low", "minimal"}:
-        tips.append("Low activity detected: include 30 minutes brisk walk or gentle yoga 5 days a week.")
-    if "vegetarian" in diet_pref:
-        tips.append("For vegetarian preference: include moong dal, ghee in moderation, and seasonal cooked vegetables.")
-    if "digestion" in goal:
-        tips.append("For digestion goal: use cumin-fennel-ginger infused warm water after meals.")
-    if "joint" in goal:
-        tips.append("For joint care: add mobility stretches and anti-inflammatory spices like turmeric.")
-    if "stress" in answer_text.lower() and not any("stress" in t.lower() for t in tips):
-        tips.append("Prioritize stress reduction because it can worsen multiple Ayurvedic imbalance patterns.")
-
-    return tips[:5]
-
-
-def build_prompt(question: str, contexts: List[Dict[str, Any]], user_profile: Optional[UserProfile]) -> str:
+def build_user_prompt(question: str, contexts: List[Dict[str, Any]]) -> str:
     context_block = "\n\n".join(
-        [
-            f"[Source: {c.get('source_file')}, Page: {c.get('page_number')}] {c.get('chunk_text')}"
-            for c in contexts
-        ]
-    )[:MAX_CONTEXT_CHARS]
-    profile_block = (
-        f"Age: {user_profile.age or 'unknown'}\n"
-        f"Gender: {user_profile.gender or 'unknown'}\n"
-        f"Lifestyle: {user_profile.lifestyle or 'unknown'}\n"
-        f"Stress Level: {user_profile.stress_level or 'unknown'}\n"
-        f"Diet: {user_profile.dietary_preference or user_profile.diet or 'unknown'}\n"
-        f"Sleep Quality: {user_profile.sleep_quality or 'unknown'}\n"
-        f"Physical Activity: {user_profile.physical_activity or 'unknown'}\n"
-        f"Health Goal: {user_profile.health_goal or 'unknown'}"
-        if user_profile
-        else "Not provided"
-    )
-    return (
-        "You are an Ayurvedic health assistant.\n"
-        "Prioritize retrieved context when answering.\n"
-        "If retrieved context is insufficient, provide a best-effort answer using reliable general Ayurvedic knowledge and explicitly mark that portion as general knowledge.\n"
-        "Do not invent citations; only cite the provided sources.\n\n"
-        f"User profile for personalization (light touch):\n{profile_block}\n\n"
-        "Retrieved context:\n\n"
-        f"{context_block}\n\n"
-        f"Question: {question}\n"
-        "Answer clearly and include concise practical guidance."
-    )
-
-
-def call_llm(prompt: str) -> str:
-    w = WorkspaceClient()
-    resp = w.serving_endpoints.query(
-        name=LLM_ENDPOINT,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        max_tokens=512,
-    )
-    if resp.choices and len(resp.choices) > 0:
-        return resp.choices[0].message.content
-    raise ValueError("No answer returned by LLM endpoint.")
-
-
-def _profile_cache_key(profile: Optional[UserProfile]) -> Tuple[str, ...]:
-    if not profile:
-        return tuple()
-    return (
-        str(profile.age or ""),
-        str(profile.gender or ""),
-        str(profile.lifestyle or ""),
-        str(profile.stress_level or ""),
-        str(profile.diet or ""),
-        str(profile.sleep_quality or ""),
-        str(profile.physical_activity or ""),
-        str(profile.dietary_preference or ""),
-        str(profile.health_goal or ""),
-    )
-
-
-@lru_cache(maxsize=256)
-def _cached_english_answer(question_en: str, top_k: int, profile_key: Tuple[str, ...]) -> Tuple[str, Tuple[Tuple[Any, ...], ...]]:
-    contexts = retrieve(question_en, top_k)
-    if not contexts:
-        raise ValueError("No relevant chunks retrieved.")
-
-    profile_for_prompt = UserProfile(
-        age=profile_key[0] if len(profile_key) > 0 else None,
-        gender=profile_key[1] if len(profile_key) > 1 else None,
-        lifestyle=profile_key[2] if len(profile_key) > 2 else None,
-        stress_level=profile_key[3] if len(profile_key) > 3 else None,
-        diet=profile_key[4] if len(profile_key) > 4 else None,
-        sleep_quality=profile_key[5] if len(profile_key) > 5 else None,
-        physical_activity=profile_key[6] if len(profile_key) > 6 else None,
-        dietary_preference=profile_key[7] if len(profile_key) > 7 else None,
-        health_goal=profile_key[8] if len(profile_key) > 8 else None,
-    ) if profile_key else None
-
-    prompt = build_prompt(question_en, contexts, profile_for_prompt)
-    answer_en = call_llm(prompt)
-    context_tuple = tuple(
-        (
-            c.get("chunk_text"),
-            c.get("source_file"),
-            c.get("page_number"),
-            c.get("score"),
-        )
+        f"[Source: {c.get('source_file', 'unknown')}, Page: {c.get('page_number')}] {c.get('chunk_text', '')}"
         for c in contexts
+    ) or "(no context)"
+    return (
+        f"Context:\n{context_block}\n\n"
+        f"Question: {question}\n\n"
+        "Answer concisely (3-6 sentences), grounded strictly in the context, "
+        "with inline citations of the form [source_file, page]."
     )
-    return answer_en, context_tuple
+
+
+def _extract_answer(resp: Any) -> str:
+    """Pull the assistant message out of a chat-completions response.
+
+    Tolerates both the OpenAI typed-object shape and dict shapes from older
+    ``serving_endpoints.query`` versions.
+    """
+    choices = getattr(resp, "choices", None)
+    if choices:
+        msg = getattr(choices[0], "message", None)
+        content = getattr(msg, "content", None) if msg is not None else None
+        if content:
+            return content
+
+    data = resp.as_dict() if hasattr(resp, "as_dict") else (
+        resp if isinstance(resp, dict) else {}
+    )
+    if isinstance(data.get("choices"), list) and data["choices"]:
+        msg = data["choices"][0].get("message") or {}
+        if msg.get("content"):
+            return msg["content"]
+        if data["choices"][0].get("text"):
+            return data["choices"][0]["text"]
+    if isinstance(data.get("predictions"), list) and data["predictions"]:
+        pred = data["predictions"][0]
+        if isinstance(pred, dict):
+            cand = (pred.get("candidates") or [None])[0]
+            if isinstance(cand, dict) and cand.get("text"):
+                return cand["text"]
+            if pred.get("content"):
+                return pred["content"]
+        elif isinstance(pred, str):
+            return pred
+    raise ValueError(f"LLM returned no usable content. Raw response: {data!r}")
+
+
+def _chat(
+    messages: List[Dict[str, str]],
+    *,
+    max_tokens: int = 512,
+    temperature: float = 0.2,
+) -> str:
+    """Generic chat-completion call with multi-version fallbacks."""
+    w = WorkspaceClient()
+    try:
+        client = w.serving_endpoints.get_open_ai_client()
+        resp = client.chat.completions.create(
+            model=LLM_ENDPOINT,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return _extract_answer(resp)
+    except AttributeError:
+        pass  # Older SDK; fall through.
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "OpenAI-compatible client failed (%s: %s); falling back to native query.",
+            type(exc).__name__,
+            exc,
+        )
+
+    last_exc: Optional[Exception] = None
+    for kwargs in (
+        {"messages": messages, "max_tokens": max_tokens, "temperature": temperature},
+        {
+            "messages": messages,
+            "extra_params": {"max_tokens": max_tokens, "temperature": temperature},
+        },
+    ):
+        try:
+            resp = w.serving_endpoints.query(name=LLM_ENDPOINT, **kwargs)
+            return _extract_answer(resp)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    raise RuntimeError(
+        f"All LLM invocation paths failed for endpoint '{LLM_ENDPOINT}'. "
+        f"Last error: {type(last_exc).__name__}: {last_exc}"
+    ) from last_exc
+
+
+def translate_text(text: str, source_language_name: str, target_language_name: str) -> str:
+    if not text or not text.strip():
+        return ""
+    if source_language_name.lower() == target_language_name.lower():
+        return text
+    messages = build_translate_messages(text, source_language_name, target_language_name)
+    return _chat(messages, max_tokens=768, temperature=0.0).strip()
+
+
+def call_llm(question: str, contexts: List[Dict[str, Any]]) -> str:
+    """Generate an English answer grounded in the retrieved context."""
+    user_prompt = build_user_prompt(question, contexts)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    return _chat(messages, max_tokens=512, temperature=0.2)
+
+
+# ---- Routes -----------------------------------------------------------------
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/languages")
+def languages() -> Dict[str, str]:
+    """Return supported language code -> human name."""
+    return SUPPORTED_LANGUAGES
 
 
 @app.post("/ask", response_model=AskResponse)
-def ask(req: AskRequest):
-    started_at = time.time()
-    try:
-        target_lang = normalize_lang_code(req.language) if req.language else detect_language(req.question)
-        if target_lang not in SUPPORTED_LANGS:
-            target_lang = "en"
+def ask(req: AskRequest) -> AskResponse:
+    # 1. Resolve languages.
+    detected = detect_language(req.question)
+    target = resolve_language(req.language) if req.language else detected
 
-        question_en = req.question if target_lang == "en" else translate_to_english(req.question, target_lang)
-        effective_top_k = max(3, min(int(req.top_k), 5))
-
-        answer_en, context_tuple = _cached_english_answer(
-            question_en,
-            effective_top_k,
-            _profile_cache_key(req.user_profile),
+    # 2. Red-flag check happens against the *original* question (regex is
+    # English-only, so for non-English questions we also check the English
+    # translation later, after we have it). We translate the canned response
+    # into the target language so the user understands it.
+    red_flag = _detect_red_flag(req.question)
+    if red_flag:
+        try:
+            localized = translate_text(red_flag, "English", target.name) if not target.is_english else red_flag
+        except Exception:  # noqa: BLE001
+            localized = red_flag
+        return AskResponse(
+            answer=localized,
+            language=target.code,
+            detected_language=detected.code,
+            disclaimer=MEDICAL_DISCLAIMER,
+            sources=[],
         )
-        contexts = [
-            {
-                "chunk_text": row[0],
-                "source_file": row[1],
-                "page_number": row[2],
-                "score": row[3],
-            }
-            for row in context_tuple
-        ]
 
-        answer = answer_en if target_lang == "en" else translate_to_user_lang(answer_en, target_lang)
-        tips = build_personalized_tips(req.user_profile, answer_en)
-        latency_ms = int((time.time() - started_at) * 1000)
+    # 3. Translate the question to English for retrieval/generation.
+    try:
+        if detected.is_english:
+            english_question = req.question
+        else:
+            english_question = _run_with_timeout(
+                translate_text, req.question, detected.name, "English"
+            )
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="Query translation timed out.")
+    except Exception:
+        logger.exception("Query translation failed")
+        raise HTTPException(status_code=502, detail="Query translation failed.")
 
+    # Re-run red-flag check against the English form for non-English queries.
+    if not detected.is_english:
+        rf2 = _detect_red_flag(english_question)
+        if rf2:
+            try:
+                localized = translate_text(rf2, "English", target.name) if not target.is_english else rf2
+            except Exception:  # noqa: BLE001
+                localized = rf2
+            return AskResponse(
+                answer=localized,
+                language=target.code,
+                detected_language=detected.code,
+                disclaimer=MEDICAL_DISCLAIMER,
+                sources=[],
+            )
+
+    # 4. Retrieve.
+    try:
+        contexts = _run_with_timeout(
+            retrieve, english_question, req.top_k, req.source_filter
+        )
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="Retrieval timed out.")
+    except Exception:
+        logger.exception("Retrieval failed")
+        raise HTTPException(status_code=502, detail="Retrieval failed.")
+
+    if not contexts:
+        msg_en = "I could not find relevant context in the knowledge base for that question."
+        try:
+            answer = translate_text(msg_en, "English", target.name) if not target.is_english else msg_en
+        except Exception:  # noqa: BLE001
+            answer = msg_en
         return AskResponse(
             answer=answer,
-            language=target_lang,
-            sources=contexts,
-            personalized_tips=tips,
-            latency_ms=latency_ms,
+            language=target.code,
+            detected_language=detected.code,
+            disclaimer=MEDICAL_DISCLAIMER,
+            sources=[],
         )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # 5. Generate the English answer.
+    try:
+        english_answer = _run_with_timeout(call_llm, english_question, contexts)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="LLM generation timed out.")
+    except Exception:
+        logger.exception("LLM generation failed")
+        raise HTTPException(status_code=502, detail="LLM generation failed.")
+
+    # 6. Translate the answer back if needed.
+    if target.is_english:
+        final_answer = english_answer
+    else:
+        try:
+            final_answer = _run_with_timeout(
+                translate_text, english_answer, "English", target.name
+            )
+        except TimeoutError:
+            raise HTTPException(status_code=504, detail="Answer translation timed out.")
+        except Exception:
+            logger.exception("Answer translation failed")
+            # Degrade gracefully: return the English answer rather than 5xx.
+            final_answer = english_answer
+
+    sources = [
+        Source(
+            chunk_text=str(c.get("chunk_text") or ""),
+            source_file=c.get("source_file"),
+            page_number=int(c["page_number"]) if c.get("page_number") is not None else None,
+            score=float(c["score"]) if c.get("score") is not None else None,
+        )
+        for c in contexts
+    ]
+    return AskResponse(
+        answer=final_answer,
+        language=target.code,
+        detected_language=detected.code,
+        disclaimer=MEDICAL_DISCLAIMER,
+        sources=sources,
+    )
 
 # COMMAND ----------
 
@@ -353,8 +596,4 @@ def ask(req: AskRequest):
 # COMMAND ----------
 
 # MAGIC %sh
-# MAGIC # uvicorn main:app --host 0.0.0.0 --port 8000
-
-# COMMAND ----------
-
-
+# MAGIC # uvicorn app:app --host 0.0.0.0 --port 8000
