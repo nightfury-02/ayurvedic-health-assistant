@@ -9,12 +9,12 @@ command:
   - app.py
 env:
   - name: DATABRICKS_TOKEN
-    value: dapief02a798e680837f8672c7a8d9779d2a
+    value: ###########################
   # The Databricks Apps runtime injects DATABRICKS_HOST without the
   # https:// scheme, which breaks databricks-vectorsearch's URL building
   # ("Invalid URL ... No scheme supplied"). Pin the full URL here.
   - name: DATABRICKS_HOST
-    value: https://dbc-a40edca6-d66f.cloud.databricks.com
+    value: https://{workspace-id}.cloud.databricks.com
   # The runtime also auto-injects DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET
   # for the app's service principal. With both PAT and OAuth env vars present,
   # the SDK refuses to guess and raises:
