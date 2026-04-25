@@ -13,6 +13,7 @@
 
 from io import BytesIO
 from typing import Dict, List
+import re
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
@@ -35,7 +36,112 @@ def clean_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def chunk_text_by_words(text: str, chunk_size: int = CHUNK_SIZE_WORDS, overlap: int = CHUNK_OVERLAP_WORDS) -> List[str]:
+def clean_pdf_text(text: str) -> str:
+    """
+    Clean messy PDF text for embedding quality:
+    - remove URLs
+    - remove citation patterns: (1), [1], [1,2]
+    - remove numbered references like "1)"
+    - remove non-ASCII text (English-dominant fallback)
+    - remove repeated symbols/artifacts
+    - normalize whitespace
+    """
+    if text is None:
+        return ""
+
+    cleaned = str(text)
+    cleaned = re.sub(r"https?://\S+|www\.\S+", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\(\s*\d{1,4}\s*\)", " ", cleaned)
+    cleaned = re.sub(r"\[\s*\d{1,4}(?:\s*,\s*\d{1,4})*\s*\]", " ", cleaned)
+    cleaned = re.sub(r"(?:(?<=\s)|^)\d+\)\s*", " ", cleaned)
+    cleaned = re.sub(r"[^\x00-\x7F]+", " ", cleaned)
+    cleaned = re.sub(r"([^\w\s])\1{2,}", r"\1", cleaned)
+    cleaned = re.sub(r"[_\-=:]{3,}", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _is_useless_line(line: str) -> bool:
+    lowered = line.lower().strip()
+    if not lowered:
+        return True
+
+    noisy_keywords = [
+        "references",
+        "bibliography",
+        "journal",
+        "doi",
+        "http",
+        "www",
+        "pg.no",
+        "edition",
+        "vol.",
+        "volume",
+        "issue",
+        "citation",
+        "issn",
+    ]
+    if any(k in lowered for k in noisy_keywords):
+        return True
+
+    # Lines that are mostly citation artifacts.
+    if re.fullmatch(r"[\[\]\(\)\d,\.\s\-:;]+", lowered):
+        return True
+
+    return False
+
+
+def _extract_field(text: str, labels: List[str]) -> str:
+    for label in labels:
+        pattern = rf"(?i)\b{label}\b\s*[:\-]\s*(.{5,220}?)(?=(?:\s+\b[A-Za-z ]{{2,35}}\s*[:\-])|$)"
+        match = re.search(pattern, text)
+        if match:
+            return clean_text(match.group(1))
+    return ""
+
+
+def structure_text(text: str, source_file: str = "", page_number: int = None) -> str:
+    """
+    Convert noisy PDF text into semi-structured, labeled blocks.
+    """
+    lines = [ln.strip() for ln in str(text or "").splitlines()]
+    useful_lines = [ln for ln in lines if not _is_useless_line(ln)]
+    filtered = clean_pdf_text(" ".join(useful_lines))
+    if not filtered:
+        return ""
+
+    ingredient = _extract_field(filtered, ["ingredient", "herb", "drug", "name"])
+    botanical = _extract_field(filtered, ["botanical name", "latin name", "scientific name"])
+    characteristics = _extract_field(filtered, ["characteristics", "properties", "description"])
+    uses = _extract_field(filtered, ["uses", "benefits", "indications"])
+    kitchen_use = _extract_field(filtered, ["kitchen use", "culinary use", "food use"])
+    ayurvedic_use = _extract_field(filtered, ["ayurvedic use", "ayurvedic uses", "ayurveda"])
+    remedies = _extract_field(filtered, ["remedies", "home remedy", "preparation", "dosage"])
+
+    # Fallback extraction for pages without explicit labels.
+    if not ingredient:
+        candidate = filtered.split(".")[0]
+        ingredient = " ".join(candidate.split()[:8]).strip()
+
+    if not uses:
+        uses = " ".join(filtered.split()[:40]).strip()
+
+    parts = [
+        f"Ingredient: {ingredient}" if ingredient else "Ingredient: Unknown",
+        f"Botanical Name: {botanical}" if botanical else "Botanical Name: Not specified",
+        f"Characteristics: {characteristics}" if characteristics else "Characteristics: Not specified",
+        f"Uses: {uses}" if uses else "Uses: Not specified",
+        f"Kitchen Use: {kitchen_use}" if kitchen_use else "Kitchen Use: Not specified",
+        f"Ayurvedic Use: {ayurvedic_use}" if ayurvedic_use else "Ayurvedic Use: Not specified",
+        f"Remedies: {remedies}" if remedies else "Remedies: Not specified",
+        f"Source File: {source_file or 'unknown_file'}",
+        f"Page Number: {str(page_number) if page_number is not None else 'unknown'}",
+    ]
+
+    return clean_text(" | ".join(parts))
+
+
+def chunk_text(text: str, chunk_size_words: int = CHUNK_SIZE_WORDS, overlap_words: int = CHUNK_OVERLAP_WORDS) -> List[str]:
     if text is None:
         return []
 
@@ -44,77 +150,36 @@ def chunk_text_by_words(text: str, chunk_size: int = CHUNK_SIZE_WORDS, overlap: 
         return []
 
     words = normalized.split()
-    if len(words) < chunk_size:
+    if len(words) <= 400:
         # Required behavior: do not split small text.
         return [normalized]
 
-    segments = [clean_text(part) for part in normalized.split("|")]
-    segments = [s for s in segments if s]
-    if not segments:
-        return [normalized]
-
-    # First pass: keep logical structure by grouping whole "|" segments.
-    base_chunks: List[str] = []
-    current_segments: List[str] = []
-    current_len = 0
-
-    for segment in segments:
-        seg_words = segment.split()
-        seg_len = len(seg_words)
-
-        if seg_len > chunk_size:
-            # Flush current chunk before splitting very large segment.
-            if current_segments:
-                base_chunks.append(" | ".join(current_segments))
-                current_segments = []
-                current_len = 0
-
-            start = 0
-            while start < seg_len:
-                end = min(start + chunk_size, seg_len)
-                piece = " ".join(seg_words[start:end])
-                base_chunks.append(piece)
-                if end >= seg_len:
-                    break
-                start += max(chunk_size - overlap, 1)
-            continue
-
-        projected_len = current_len + seg_len
-        if current_segments:
-            projected_len += 1  # for visual "|" separator boundary
-
-        if current_segments and projected_len > chunk_size:
-            base_chunks.append(" | ".join(current_segments))
-            current_segments = [segment]
-            current_len = seg_len
-        else:
-            current_segments.append(segment)
-            current_len = projected_len if current_len > 0 else seg_len
-
-    if current_segments:
-        base_chunks.append(" | ".join(current_segments))
-
-    # Second pass: word overlap for retrieval continuity.
-    overlapped_chunks: List[str] = []
-    for idx, chunk in enumerate(base_chunks):
-        if idx == 0:
-            overlapped_chunks.append(chunk)
-            continue
-
-        prev_words = base_chunks[idx - 1].split()
-        tail = prev_words[-overlap:] if len(prev_words) > overlap else prev_words
-        candidate_words = tail + chunk.split()
-
-        if len(candidate_words) > chunk_size:
-            candidate_words = candidate_words[:chunk_size]
-
-        overlapped_chunks.append(" ".join(candidate_words))
-
-    return [c for c in overlapped_chunks if c]
+    chunks: List[str] = []
+    step = max(chunk_size_words - overlap_words, 1)
+    start = 0
+    while start < len(words):
+        end = min(start + chunk_size_words, len(words))
+        chunk_words = words[start:end]
+        if chunk_words:
+            chunks.append(" ".join(chunk_words))
+        if end >= len(words):
+            break
+        start += step
+    return chunks
 
 
-chunker_udf = F.udf(chunk_text_by_words, T.ArrayType(T.StringType()))
+def translate_to_english_placeholder(text: str) -> str:
+    """
+    Placeholder for future IndicTrans2 integration.
+    Keep pass-through for now to avoid runtime dependency.
+    """
+    return text
+
+
+chunker_udf = F.udf(chunk_text, T.ArrayType(T.StringType()))
 clean_text_udf = F.udf(clean_text, T.StringType())
+clean_pdf_text_udf = F.udf(clean_pdf_text, T.StringType())
+structure_text_udf = F.udf(structure_text, T.StringType())
 
 # COMMAND ----------
 
@@ -294,19 +359,17 @@ if pdf_rows:
     pdf_pages_df = spark.createDataFrame(pdf_rows)
     pdf_structured_df = (
         pdf_pages_df.withColumn("source_type", F.lit("pdf"))
-        .withColumn("page_text", clean_text_udf(F.col("page_text")))
+        .withColumn("page_text", clean_pdf_text_udf(F.col("page_text")))
+        .filter(F.length(F.trim(F.col("page_text"))) > 0)
         .withColumn(
             "raw_text",
-            F.concat(
-                F.lit("Source: pdf"),
-                F.lit(" | Source File: "),
-                F.col("source_file"),
-                F.lit(" | Page Number: "),
-                F.col("page_number").cast("string"),
-                F.lit(" | Content: "),
+            structure_text_udf(
                 F.col("page_text"),
+                F.col("source_file"),
+                F.col("page_number"),
             ),
         )
+        .filter(F.length(F.trim(F.col("raw_text"))) > 0)
         .select(
             F.expr("uuid()").alias("row_id"),
             "raw_text",
@@ -321,6 +384,7 @@ else:
         "row_id string, raw_text string, source_type string, source_file string, page_number int",
     )
 
+# Unified pipeline: include both CSV and PDF records.
 base_df = csv_structured_df.unionByName(pdf_structured_df, allowMissingColumns=True)
 if base_df.count() == 0:
     raise ValueError("No structured records built from CSV/PDF inputs.")
@@ -334,6 +398,7 @@ if base_df.count() == 0:
 
 chunked_df = (
     base_df.withColumn("raw_text", clean_text_udf(F.col("raw_text")))
+    .filter(F.length(F.trim(F.col("raw_text"))) > 0)
     .withColumn("chunk_array", chunker_udf(F.col("raw_text")))
     .withColumn("chunk_with_pos", F.posexplode_outer(F.col("chunk_array")))
     .select(
@@ -347,8 +412,22 @@ chunked_df = (
     .filter(F.col("chunk_text").isNotNull() & (F.length(F.trim(F.col("chunk_text"))) > 0))
 )
 
+filtered_chunked_df = (
+    chunked_df.withColumn("chunk_word_count", F.size(F.split(F.trim(F.col("chunk_text")), r"\s+")))
+    .withColumn("alpha_chars", F.length(F.regexp_replace(F.col("chunk_text"), r"[^A-Za-z]", "")))
+    .withColumn("visible_chars", F.length(F.regexp_replace(F.col("chunk_text"), r"\s+", "")))
+    .withColumn(
+        "alpha_ratio",
+        F.when(F.col("visible_chars") > 0, F.col("alpha_chars") / F.col("visible_chars")).otherwise(F.lit(0.0)),
+    )
+    .filter(F.col("chunk_word_count") >= 30)
+    .filter(F.col("alpha_ratio") >= 0.35)
+    .filter(~F.lower(F.col("chunk_text")).rlike(r"^\s*(references|bibliography|doi|journal|www|http)\s*$"))
+    .drop("chunk_word_count", "alpha_chars", "visible_chars", "alpha_ratio")
+)
+
 final_df = (
-    chunked_df.withColumn("chunk_index", F.col("chunk_index").cast("int"))
+    filtered_chunked_df.withColumn("chunk_index", F.col("chunk_index").cast("int"))
     .withColumn("chunk_text", clean_text_udf(F.col("chunk_text")))
     .withColumn(
         "chunk_id",
