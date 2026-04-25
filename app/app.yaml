@@ -9,7 +9,7 @@ command:
   - app.py
 env:
   - name: DATABRICKS_TOKEN
-    value: ###########################
+    value: #################
   # The Databricks Apps runtime injects DATABRICKS_HOST without the
   # https:// scheme, which breaks databricks-vectorsearch's URL building
   # ("Invalid URL ... No scheme supplied"). Pin the full URL here.
