@@ -1,1 +1,6 @@
-streamlit
+streamlit>=1.28
+pandas>=2.0
+databricks-sql-connector>=3.0
+databricks-vectorsearch>=0.40
+openai>=1.0
+sarvamai>=0.1.0
