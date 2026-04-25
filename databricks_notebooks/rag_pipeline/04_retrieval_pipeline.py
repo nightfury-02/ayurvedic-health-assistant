@@ -27,12 +27,15 @@ USER_QUERY = "What are the Ayurvedic recommendations for digestion and immunity?
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 4
 from pyspark.sql import functions as F
 
 try:
+    # Escape single quotes for SQL by replacing with double single quotes
+    escaped_query = USER_QUERY.replace("'", "''")
     query_embedding_row = spark.sql(
         f"""
-        SELECT ai_query('{EMBEDDING_ENDPOINT}', '{USER_QUERY.replace("'", "\\'")}') AS embedding
+        SELECT ai_query('{EMBEDDING_ENDPOINT}', '{escaped_query}') AS embedding
         """
     ).first()
     query_embedding = query_embedding_row["embedding"]
@@ -48,6 +51,12 @@ if not query_embedding:
 
 # MAGIC %md
 # MAGIC ## Retrieve similar chunks
+
+# COMMAND ----------
+
+# DBTITLE 1,Install Vector Search package
+# MAGIC %pip install databricks-vectorsearch
+# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -81,3 +90,15 @@ else:
         chunk_text = row[0] if len(row) > 0 else None
         score = row[-1] if len(row) > 0 else None
         print({"chunk_text": chunk_text, "similarity_score": score})
+
+# COMMAND ----------
+
+from databricks.vector_search.client import VectorSearchClient
+vsc = VectorSearchClient()
+index = vsc.get_index(endpoint_name="ayurgenix-vs-endpoint", 
+                      index_name="bricksiitm.ayurgenix.knowledge_base_embeddings_index")
+print(index.describe())
+
+# COMMAND ----------
+
+

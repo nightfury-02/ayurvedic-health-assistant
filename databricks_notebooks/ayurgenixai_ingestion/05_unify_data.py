@@ -396,15 +396,16 @@ if base_df.count() == 0:
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 10
 chunked_df = (
     base_df.withColumn("raw_text", clean_text_udf(F.col("raw_text")))
     .filter(F.length(F.trim(F.col("raw_text"))) > 0)
     .withColumn("chunk_array", chunker_udf(F.col("raw_text")))
-    .withColumn("chunk_with_pos", F.posexplode_outer(F.col("chunk_array")))
+    .select("*", F.posexplode_outer(F.col("chunk_array")).alias("chunk_index", "chunk_text"))
     .select(
         "row_id",
-        F.col("chunk_with_pos.pos").alias("chunk_index"),
-        F.col("chunk_with_pos.col").alias("chunk_text"),
+        "chunk_index",
+        "chunk_text",
         "source_type",
         "source_file",
         "page_number",
@@ -420,8 +421,8 @@ filtered_chunked_df = (
         "alpha_ratio",
         F.when(F.col("visible_chars") > 0, F.col("alpha_chars") / F.col("visible_chars")).otherwise(F.lit(0.0)),
     )
-    .filter(F.col("chunk_word_count") >= 30)
-    .filter(F.col("alpha_ratio") >= 0.35)
+    .filter(F.col("chunk_word_count") >= 10)
+    .filter(F.col("alpha_ratio") >= 0.2)
     .filter(~F.lower(F.col("chunk_text")).rlike(r"^\s*(references|bibliography|doi|journal|www|http)\s*$"))
     .drop("chunk_word_count", "alpha_chars", "visible_chars", "alpha_ratio")
 )
@@ -476,3 +477,5 @@ print(f"Saved processed knowledge base: {PROCESSED_TABLE}")
 display(final_df.limit(20))
 
 # COMMAND ----------
+
+

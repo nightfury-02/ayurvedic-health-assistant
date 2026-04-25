@@ -102,3 +102,7 @@ except Exception as exc:
 
 print(f"Saved embeddings table: {TARGET_TABLE}")
 display(embedded_df.select("chunk_id", "chunk_text", "embedding").limit(5))
+
+# COMMAND ----------
+
+

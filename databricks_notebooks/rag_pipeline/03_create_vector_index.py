@@ -24,36 +24,56 @@ PRIMARY_KEY = "chunk_id"
 
 # COMMAND ----------
 
+# DBTITLE 1,Enable Change Data Feed on source table
+# Enable Change Data Feed (CDF) on the source table
+# This is required for Delta Sync indexes to track changes
+
+print(f"Enabling Change Data Feed on {EMBEDDINGS_TABLE}...")
+
+spark.sql(f"""
+    ALTER TABLE {EMBEDDINGS_TABLE}
+    SET TBLPROPERTIES (delta.enableChangeDataFeed = true)
+""")
+
+print("✅ Change Data Feed enabled successfully.")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Create endpoint and index
 
 # COMMAND ----------
 
-try:
-    from databricks.vector_search.client import VectorSearchClient
-except Exception as exc:
-    raise RuntimeError(
-        "Vector Search client is unavailable. Install/enable databricks-vectorsearch."
-    ) from exc
+# DBTITLE 1,Install Vector Search package
+# MAGIC %pip install databricks-vectorsearch
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+# DBTITLE 1,Cell 5
+# Initialize client
+from databricks.vector_search.client import VectorSearchClient
 
 vsc = VectorSearchClient()
 
-try:
-    endpoints = vsc.list_endpoints()
-    endpoint_names = {ep.get("name") for ep in endpoints.get("endpoints", [])}
-    if VECTOR_ENDPOINT_NAME not in endpoint_names:
-        print(f"Creating Vector Search endpoint: {VECTOR_ENDPOINT_NAME}")
-        vsc.create_endpoint(name=VECTOR_ENDPOINT_NAME, endpoint_type="STANDARD")
-    else:
-        print(f"Endpoint already exists: {VECTOR_ENDPOINT_NAME}")
-except Exception as exc:
-    raise RuntimeError("Failed to create or validate Vector Search endpoint.") from exc
+print(f"Using existing endpoint: {VECTOR_ENDPOINT_NAME}")
 
+# Create or validate index
 try:
-    indexes = vsc.list_indexes(endpoint_name=VECTOR_ENDPOINT_NAME)
-    index_names = {idx.get("name") for idx in indexes.get("vector_indexes", [])}
+    indexes = vsc.list_indexes(VECTOR_ENDPOINT_NAME)
+
+    # Handle response safely
+    index_list = (
+        indexes.get("vector_indexes")
+        or indexes.get("indexes")
+        or []
+    )
+
+    index_names = {idx.get("name") for idx in index_list}
+
     if VECTOR_INDEX_NAME not in index_names:
         print(f"Creating index: {VECTOR_INDEX_NAME}")
+
         vsc.create_delta_sync_index(
             endpoint_name=VECTOR_ENDPOINT_NAME,
             index_name=VECTOR_INDEX_NAME,
@@ -63,11 +83,22 @@ try:
             embedding_dimension=EMBEDDING_DIMENSION,
             embedding_vector_column=EMBEDDING_COLUMN,
         )
+
+        print("Index creation triggered. It may take a few minutes...")
+
     else:
         print(f"Index already exists: {VECTOR_INDEX_NAME}")
+
 except Exception as exc:
+    print("Detailed error:", str(exc))
     raise RuntimeError("Failed to create or validate Vector Search index.") from exc
 
-print("Vector Search setup complete.")
+
+print("✅ Vector Search setup complete.")
 print(f"Endpoint: {VECTOR_ENDPOINT_NAME}")
 print(f"Index: {VECTOR_INDEX_NAME}")
+
+# COMMAND ----------
+
+
+
