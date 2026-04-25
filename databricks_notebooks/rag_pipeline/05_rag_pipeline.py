@@ -11,8 +11,20 @@
 
 # COMMAND ----------
 
+<<<<<<< Updated upstream
 from databricks.sdk import WorkspaceClient
 from databricks.vector_search.client import VectorSearchClient
+=======
+# DBTITLE 1,Install Vector Search package
+# MAGIC %pip install databricks-vectorsearch
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+from databricks.sdk import WorkspaceClient
+from databricks.vector_search.client import VectorSearchClient
+from databricks.sdk.service.serving import ChatMessage
+>>>>>>> Stashed changes
 
 CATALOG = "bricksiitm"
 SCHEMA = "ayurgenix"
@@ -23,7 +35,11 @@ EMBEDDING_ENDPOINT = "databricks-gte-large-en"
 LLM_ENDPOINT = "databricks-meta-llama-3-3-70b-instruct"
 
 TOP_K = 5
+<<<<<<< Updated upstream
 USER_QUERY = "How does Ayurveda recommend improving sleep quality?"
+=======
+USER_QUERY = "what is fenugreek used for?"
+>>>>>>> Stashed changes
 
 # COMMAND ----------
 
@@ -32,8 +48,14 @@ USER_QUERY = "How does Ayurveda recommend improving sleep quality?"
 
 # COMMAND ----------
 
+<<<<<<< Updated upstream
 def get_query_embedding(query: str):
     safe_query = query.replace("'", "\\'")
+=======
+# DBTITLE 1,Cell 5
+def get_query_embedding(query: str):
+    safe_query = query.replace("'", "''")
+>>>>>>> Stashed changes
     result = spark.sql(
         f"SELECT ai_query('{EMBEDDING_ENDPOINT}', '{safe_query}') AS embedding"
     ).first()
@@ -55,6 +77,7 @@ def retrieve_context(query: str, k: int = TOP_K):
         columns=["chunk_text", "source_file", "page_number"],
         num_results=k,
     )
+<<<<<<< Updated upstream
     rows = response.get("result", {}).get("data_array", [])
     print(f"[DEBUG][RAG] Retrieved rows: {len(rows)}")
     if rows:
@@ -69,6 +92,9 @@ def retrieve_context(query: str, k: int = TOP_K):
         ]
         print(f"[DEBUG][RAG] Top retrieval preview: {preview}")
     return rows
+=======
+    return response.get("result", {}).get("data_array", [])
+>>>>>>> Stashed changes
 
 
 def build_prompt(question: str, rows):
@@ -82,6 +108,7 @@ def build_prompt(question: str, rows):
         )
     context_block = "\n\n".join(context_lines)
     return (
+<<<<<<< Updated upstream
         "You are an Ayurvedic health assistant.\n"
         "Use the retrieved context as your first and strongest source of truth.\n"
         "If the context is weak, incomplete, or partially relevant, provide the best possible answer using reliable general Ayurvedic knowledge.\n"
@@ -105,6 +132,29 @@ def generate_answer(prompt: str):
     if resp.choices and len(resp.choices) > 0:
         return resp.choices[0].message.content
     raise ValueError("LLM returned no choices.")
+=======
+        "Answer the question using the context below:\n\n"
+        f"{context_block}\n\n"
+        f"Question: {question}\n"
+        "If context is insufficient, say so clearly."
+    )
+
+
+def generate_answer(prompt):
+    from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
+    w = WorkspaceClient()
+
+    resp = w.serving_endpoints.query(
+        name=LLM_ENDPOINT,
+        messages=[ChatMessage(role=ChatMessageRole.USER, content=prompt)],
+        max_tokens=512,
+        temperature=0.2,
+    )
+
+    if resp.choices and len(resp.choices) > 0:
+        return resp.choices[0].message.content
+    return "No response generated."
+>>>>>>> Stashed changes
 
 # COMMAND ----------
 
@@ -132,3 +182,10 @@ print("Question:")
 print(USER_QUERY)
 print("\nAnswer:")
 print(answer)
+<<<<<<< Updated upstream
+=======
+
+# COMMAND ----------
+
+
+>>>>>>> Stashed changes

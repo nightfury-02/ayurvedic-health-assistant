@@ -18,7 +18,7 @@ VECTOR_INDEX_NAME = f"{CATALOG}.{SCHEMA}.knowledge_base_embeddings_index"
 EMBEDDING_ENDPOINT = "databricks-gte-large-en"
 
 TOP_K = 5
-USER_QUERY = "What are the Ayurvedic recommendations for digestion and immunity?"
+USER_QUERY = "what are uses of ginger?"
 
 # COMMAND ----------
 
@@ -73,7 +73,7 @@ try:
         index_name=VECTOR_INDEX_NAME,
     )
     response = index.similarity_search(
-        query_vector=query_embedding,
+        query_vector=query_embedding, # Ensure 'query_embedding' is defined before this line
         columns=["chunk_text", "source_file", "page_number"],
         num_results=TOP_K,
     )
