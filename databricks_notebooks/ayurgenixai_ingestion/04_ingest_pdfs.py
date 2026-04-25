@@ -21,34 +21,47 @@ from io import BytesIO
 from typing import List, Dict
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+import importlib.util
+import os
 
 CATALOG = "bricksiitm"
 SCHEMA = "ayurgenix"
 RAW_DATA_PATH = "/Volumes/bricksiitm/ayurgenix/files/raw_data/"
 PDF_STAGING_TABLE = f"{CATALOG}.{SCHEMA}.pdf_chunks_staging"
 
-CHUNK_SIZE = 1200
-CHUNK_OVERLAP = 200
+CHUNK_SIZE_WORDS = 350
+CHUNK_OVERLAP_WORDS = 70
 
 
-def text_chunker(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
-    if text is None:
-        return []
-    normalized = " ".join(text.split())
-    if not normalized:
-        return []
-    chunks = []
-    start = 0
-    step = max(chunk_size - overlap, 1)
-    while start < len(normalized):
-        end = min(start + chunk_size, len(normalized))
-        chunk = normalized[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end == len(normalized):
-            break
-        start += step
-    return chunks
+def _import_shared_chunker():
+    try:
+        from databricks_notebooks.rag_pipeline.chunking_utils import chunk_text_by_words
+        return chunk_text_by_words
+    except Exception:
+        current = os.getcwd()
+        while True:
+            candidate = os.path.join(
+                current, "databricks_notebooks", "rag_pipeline", "chunking_utils.py"
+            )
+            if os.path.exists(candidate):
+                spec = importlib.util.spec_from_file_location("chunking_utils", candidate)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module.chunk_text_by_words
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        raise ImportError("Unable to locate shared chunking_utils.py")
+
+
+chunk_text_by_words = _import_shared_chunker()
+
+
+def text_chunker(text: str):
+    return chunk_text_by_words(
+        text, chunk_size_words=CHUNK_SIZE_WORDS, overlap_words=CHUNK_OVERLAP_WORDS
+    )
 
 
 def read_pdf_bytes(pdf_path: str) -> bytes:
@@ -164,7 +177,24 @@ for pdf_path in pdf_files:
         failed_files.append((pdf_path, "empty_or_unreadable_pdf"))
         continue
 
-    extracted_rows.extend(page_records)
+    valid_pages = [
+        r for r in page_records
+        if r.get("page_text") and str(r.get("page_text")).strip()
+    ]
+    if not valid_pages:
+        failed_files.append((pdf_path, "no_non_empty_page_text"))
+        continue
+
+    full_text = "\n\n".join(
+        str(r["page_text"]).strip() for r in sorted(valid_pages, key=lambda x: x["page_number"])
+    )
+    extracted_rows.append(
+        {
+            "file_name": file_name,
+            "page_count": len(valid_pages),
+            "document_text": full_text,
+        }
+    )
 
 if failed_files:
     print("Some PDFs were skipped due to errors:")
@@ -174,7 +204,7 @@ if failed_files:
 if not extracted_rows:
     raise ValueError("No readable PDF content extracted from provided files.")
 
-pdf_pages_df = spark.createDataFrame(extracted_rows)
+pdf_docs_df = spark.createDataFrame(extracted_rows)
 
 # COMMAND ----------
 
@@ -186,7 +216,7 @@ pdf_pages_df = spark.createDataFrame(extracted_rows)
 chunker_udf = F.udf(text_chunker, "array<string>")
 
 chunked_df = (
-    pdf_pages_df.withColumn("clean_text", F.regexp_replace(F.col("page_text"), r"\s+", " "))
+    pdf_docs_df.withColumn("clean_text", F.regexp_replace(F.col("document_text"), r"\s+", " "))
     .withColumn("text_chunk_array", chunker_udf(F.col("clean_text")))
     .withColumn("text_chunk", F.explode_outer(F.col("text_chunk_array")))
     .filter(F.col("text_chunk").isNotNull() & (F.length(F.col("text_chunk")) > 0))
@@ -201,8 +231,8 @@ pdf_chunks_df = (
         F.to_json(
             F.struct(
                 F.col("file_name"),
-                F.col("page_number"),
-                F.lit("pdf_page").alias("record_type")
+                    F.col("page_count"),
+                    F.lit("pdf_document").alias("record_type")
             )
         )
     )

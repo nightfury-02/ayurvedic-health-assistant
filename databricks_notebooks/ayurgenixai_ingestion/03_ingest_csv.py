@@ -7,34 +7,47 @@
 
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+import importlib.util
+import os
 
 CATALOG = "bricksiitm"
 SCHEMA = "ayurgenix"
 RAW_DATA_PATH = "/Volumes/bricksiitm/ayurgenix/files/raw_data/"
 CSV_STAGING_TABLE = f"{CATALOG}.{SCHEMA}.csv_chunks_staging"
 
-CHUNK_SIZE = 1200
-CHUNK_OVERLAP = 200
+CHUNK_SIZE_WORDS = 350
+CHUNK_OVERLAP_WORDS = 70
 
 
-def text_chunker(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
-    if text is None:
-        return []
-    normalized = " ".join(text.split())
-    if not normalized:
-        return []
-    chunks = []
-    start = 0
-    step = max(chunk_size - overlap, 1)
-    while start < len(normalized):
-        end = min(start + chunk_size, len(normalized))
-        chunk = normalized[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end == len(normalized):
-            break
-        start += step
-    return chunks
+def _import_shared_chunker():
+    try:
+        from databricks_notebooks.rag_pipeline.chunking_utils import chunk_text_by_words
+        return chunk_text_by_words
+    except Exception:
+        current = os.getcwd()
+        while True:
+            candidate = os.path.join(
+                current, "databricks_notebooks", "rag_pipeline", "chunking_utils.py"
+            )
+            if os.path.exists(candidate):
+                spec = importlib.util.spec_from_file_location("chunking_utils", candidate)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module.chunk_text_by_words
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        raise ImportError("Unable to locate shared chunking_utils.py")
+
+
+chunk_text_by_words = _import_shared_chunker()
+
+
+def text_chunker(text: str):
+    return chunk_text_by_words(
+        text, chunk_size_words=CHUNK_SIZE_WORDS, overlap_words=CHUNK_OVERLAP_WORDS
+    )
 
 
 chunker_udf = F.udf(text_chunker, "array<string>")
