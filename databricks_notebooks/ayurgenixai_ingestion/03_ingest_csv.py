@@ -10,9 +10,10 @@ from pyspark.sql.window import Window
 import importlib.util
 import os
 
-CATALOG = "bricksiitm"
-SCHEMA = "ayurgenix"
-RAW_DATA_PATH = "/Volumes/bricksiitm/ayurgenix/files/raw_data/"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
+VOLUME = "source_files"
+RAW_DATA_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}/raw_data/"
 CSV_STAGING_TABLE = f"{CATALOG}.{SCHEMA}.csv_chunks_staging"
 
 CHUNK_SIZE_WORDS = 350

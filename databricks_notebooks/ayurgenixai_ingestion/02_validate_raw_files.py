@@ -7,7 +7,10 @@
 
 from pyspark.sql import functions as F
 
-RAW_DATA_PATH = "/Volumes/bricksiitm/ayurgenix/files/raw_data/"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
+VOLUME = "source_files"
+RAW_DATA_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}/raw_data/"
 
 
 def discover_files(path: str):

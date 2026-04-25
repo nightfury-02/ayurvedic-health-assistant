@@ -4,14 +4,14 @@
 # MAGIC
 # MAGIC This notebook creates:
 # MAGIC - Vector Search endpoint
-# MAGIC - Delta Sync index on `bricksiitm.ayurgenix.knowledge_base_embeddings`
+# MAGIC - Delta Sync index on `ayurveda_assistant.ingestion.knowledge_base_embeddings`
 # MAGIC
 # MAGIC Adjust names below once and re-run safely.
 
 # COMMAND ----------
 
-CATALOG = "bricksiitm"
-SCHEMA = "ayurgenix"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
 
 EMBEDDINGS_TABLE = f"{CATALOG}.{SCHEMA}.knowledge_base_embeddings"
 VECTOR_ENDPOINT_NAME = "ayurgenix-vs-endpoint"

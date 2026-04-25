@@ -2,12 +2,12 @@
 # MAGIC %md
 # MAGIC # 06 - Save Unified Dataset as Delta
 # MAGIC This notebook persists the unified RAG dataset into the final Delta table:
-# MAGIC `bricksiitm.ayurgenix.knowledge_base`
+# MAGIC `ayurveda_assistant.ingestion.knowledge_base`
 
 # COMMAND ----------
 
-CATALOG = "bricksiitm"
-SCHEMA = "ayurgenix"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
 UNIFIED_STAGING_TABLE = f"{CATALOG}.{SCHEMA}.knowledge_base_unified_staging"
 FINAL_TABLE = f"{CATALOG}.{SCHEMA}.knowledge_base"
 

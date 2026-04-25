@@ -7,7 +7,7 @@
 # MAGIC - deterministic chunk metadata
 # MAGIC
 # MAGIC Final output table:
-# MAGIC `bricksiitm.ayurgenix.processed_knowledge_base`
+# MAGIC `ayurveda_assistant.ingestion.processed_knowledge_base`
 
 # COMMAND ----------
 
@@ -17,11 +17,12 @@ import re
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-CATALOG = "bricksiitm"
-SCHEMA = "ayurgenix"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
+VOLUME = "source_files"
 
 PROCESSED_TABLE = f"{CATALOG}.{SCHEMA}.processed_knowledge_base"
-RAW_DATA_PATH = "/Volumes/bricksiitm/ayurgenix/files/raw_data/"
+RAW_DATA_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}/raw_data/"
 
 # Chunking requirements:
 # - 300-400 words per chunk

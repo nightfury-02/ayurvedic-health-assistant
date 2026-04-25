@@ -3,7 +3,7 @@
 # MAGIC # 02 - Generate Embeddings
 # MAGIC
 # MAGIC This notebook reads `processed_knowledge_base`, generates embeddings for `chunk_text`,
-# MAGIC and writes output to `bricksiitm.ayurgenix.knowledge_base_embeddings`.
+# MAGIC and writes output to `ayurveda_assistant.ingestion.knowledge_base_embeddings`.
 # MAGIC
 # MAGIC Default strategy uses Databricks Model Serving embedding endpoint (`ai_query`).
 # MAGIC A fallback using SentenceTransformers is provided.
@@ -13,8 +13,8 @@
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-CATALOG = "bricksiitm"
-SCHEMA = "ayurgenix"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
 
 SOURCE_TABLE = f"{CATALOG}.{SCHEMA}.processed_knowledge_base"
 TARGET_TABLE = f"{CATALOG}.{SCHEMA}.knowledge_base_embeddings"

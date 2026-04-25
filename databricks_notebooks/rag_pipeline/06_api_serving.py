@@ -26,8 +26,8 @@ from pydantic import BaseModel, Field
 from databricks.sdk import WorkspaceClient
 from databricks.vector_search.client import VectorSearchClient
 
-CATALOG = "bricksiitm"
-SCHEMA = "ayurgenix"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
 
 VECTOR_ENDPOINT_NAME = "ayurgenix-vs-endpoint"
 VECTOR_INDEX_NAME = f"{CATALOG}.{SCHEMA}.knowledge_base_embeddings_index"

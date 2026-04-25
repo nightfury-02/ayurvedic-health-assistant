@@ -7,7 +7,9 @@
 
 from pyspark.sql import functions as F
 
-FINAL_TABLE = "bricksiitm.ayurgenix.knowledge_base"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
+FINAL_TABLE = f"{CATALOG}.{SCHEMA}.knowledge_base"
 
 df = spark.table(FINAL_TABLE)
 
@@ -62,14 +64,14 @@ spark.sql(
 # MAGIC   MAX(length(text_chunk)) as max_len, 
 # MAGIC   MIN(length(text_chunk)) as min_len, 
 # MAGIC   AVG(length(text_chunk)) as avg_len
-# MAGIC FROM bricksiitm.ayurgenix.knowledge_base
+# MAGIC FROM ayurveda_assistant.ingestion.knowledge_base
 # MAGIC
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC SELECT source_type, COUNT(*) 
-# MAGIC FROM bricksiitm.ayurgenix.knowledge_base
+# MAGIC FROM ayurveda_assistant.ingestion.knowledge_base
 # MAGIC GROUP BY source_type;
 
 # COMMAND ----------

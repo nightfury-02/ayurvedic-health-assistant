@@ -4,15 +4,15 @@
 # MAGIC This notebook creates Unity Catalog objects for the AyurGenixAI ingestion pipeline.
 # MAGIC
 # MAGIC **Objects**
-# MAGIC - Catalog: `bricksiitm`
-# MAGIC - Schema: `ayurgenix`
-# MAGIC - Volume: `files`
+# MAGIC - Catalog: `ayurveda_assistant`
+# MAGIC - Schema: `ingestion`
+# MAGIC - Volume: `source_files`
 
 # COMMAND ----------
 
-CATALOG = "bricksiitm"
-SCHEMA = "ayurgenix"
-VOLUME = "files"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
+VOLUME = "source_files"
 
 spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
@@ -27,11 +27,11 @@ print(f"Volume ready: {CATALOG}.{SCHEMA}.{VOLUME}")
 # MAGIC %md
 # MAGIC ## Verify volume path
 # MAGIC Expected raw data directory:
-# MAGIC `/Volumes/bricksiitm/ayurgenix/files/raw_data/`
+# MAGIC `/Volumes/ayurveda_assistant/ingestion/source_files/raw_data/`
 
 # COMMAND ----------
 
-RAW_DATA_PATH = "/Volumes/bricksiitm/ayurgenix/files/raw_data/"
+RAW_DATA_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}/raw_data/"
 print(f"Raw data path configured: {RAW_DATA_PATH}")
 
 # COMMAND ----------

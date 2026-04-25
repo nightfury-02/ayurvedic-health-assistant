@@ -16,8 +16,8 @@
 
 # COMMAND ----------
 
-CATALOG = "bricksiitm"
-SCHEMA = "ayurgenix"
+CATALOG = "ayurveda_assistant"
+SCHEMA = "ingestion"
 
 VECTOR_ENDPOINT_NAME = "ayurgenix-vs-endpoint"
 VECTOR_INDEX_NAME = f"{CATALOG}.{SCHEMA}.knowledge_base_embeddings_index"
@@ -95,8 +95,10 @@ else:
 
 from databricks.vector_search.client import VectorSearchClient
 vsc = VectorSearchClient()
-index = vsc.get_index(endpoint_name="ayurgenix-vs-endpoint", 
-                      index_name="bricksiitm.ayurgenix.knowledge_base_embeddings_index")
+index = vsc.get_index(
+        endpoint_name=VECTOR_ENDPOINT_NAME,
+        index_name=VECTOR_INDEX_NAME,
+    )
 print(index.describe())
 
 # COMMAND ----------
