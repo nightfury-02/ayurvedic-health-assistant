@@ -1,1 +1,7 @@
 streamlit
+requests
+pydantic
+databricks-sdk
+databricks-vectorsearch
+fastapi
+uvicorn[standard]

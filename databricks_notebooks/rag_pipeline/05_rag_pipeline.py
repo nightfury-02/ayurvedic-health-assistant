@@ -299,22 +299,22 @@ def ask_multilingual(question: str, top_k: int = TOP_K, user_lang: Optional[str]
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Execute RAG pipeline
+# MAGIC ## Execute RAG pipeline (optional — run this cell in the notebook only)
 
 # COMMAND ----------
 
-try:
-    result = ask_multilingual(USER_QUERY, TOP_K)
-except Exception as exc:
-    raise RuntimeError("Multilingual RAG execution failed.") from exc
+if __name__ == "__main__":
+    try:
+        result = ask_multilingual(USER_QUERY, TOP_K)
+    except Exception as exc:
+        raise RuntimeError("Multilingual RAG execution failed.") from exc
 
-print("Question:")
-print(USER_QUERY)
-print("\nDetected Language:")
-print(result["language"])
-print("\nAnswer:")
-print(result["answer"])
+    print("Question:")
+    print(USER_QUERY)
+    print("\nDetected Language:")
+    print(result["language"])
+    print("\nAnswer:")
+    print(result["answer"])
 
 # COMMAND ----------
-
 
