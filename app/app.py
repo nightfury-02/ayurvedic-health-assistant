@@ -3,9 +3,11 @@ import streamlit as st
 
 from backend.config import (
     CURATED_TABLE,
+    SQL_WAREHOUSE_CONFIGURED,
     USE_LOCAL_FALLBACK,
     VECTOR_SEARCH_ENDPOINT,
-    VECTOR_SEARCH_INDEX,
+    VECTOR_SEARCH_INDEX_CURATED,
+    VECTOR_SEARCH_INDEX_PDF,
 )
 from backend.rag import legacy_symptom_card, run_chat
 
@@ -17,8 +19,10 @@ st.caption("Hybrid RAG: Mosaic AI Vector Search + Delta SQL + Sarvam (educationa
 with st.sidebar:
     st.subheader("Runtime")
     st.write("**Lakehouse mode:**", "off (local CSV)" if USE_LOCAL_FALLBACK else "on (Databricks)")
+    st.write("**SQL warehouse (AyurGenix SQL):**", "yes" if SQL_WAREHOUSE_CONFIGURED else "no")
     st.write("**Curated table:**", CURATED_TABLE)
-    st.write("**Vector index:**", VECTOR_SEARCH_INDEX or "(not set)")
+    st.write("**PDF vector index:**", VECTOR_SEARCH_INDEX_PDF or "(not set)")
+    st.write("**Curated vector index:**", VECTOR_SEARCH_INDEX_CURATED or "(not set)")
     st.write("**VS endpoint:**", VECTOR_SEARCH_ENDPOINT or "(not set)")
     if not os.getenv("SARVAM_API_KEY"):
         st.warning("Set `SARVAM_API_KEY` for full LLM answers.")
@@ -42,8 +46,10 @@ with tab_chat:
             st.markdown(out.get("answer") or "_Empty response_")
             with st.expander("Retrieved PDF chunks (metadata)"):
                 st.json(out.get("chunk_hits") or [])
-            with st.expander("Retrieved AyurGenix rows"):
+            with st.expander("Retrieved AyurGenix rows (SQL or local)"):
                 st.json(out.get("curated_hits") or [])
+            with st.expander("Retrieved AyurGenix rows (curated vector index)"):
+                st.json(out.get("curated_vector_hits") or [])
             with st.expander("Context preview (truncated)"):
                 st.text(out.get("context_preview") or "")
 

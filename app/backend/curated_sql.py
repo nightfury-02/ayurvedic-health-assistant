@@ -17,6 +17,8 @@ def _tokens(q: str) -> list[str]:
 def search_curated_sql(query: str) -> list[dict[str, Any]]:
     if config.USE_LOCAL_FALLBACK:
         return []
+    if not config.SQL_WAREHOUSE_CONFIGURED:
+        return []
     tokens = _tokens(query)
     if not tokens:
         tokens = [query.lower()[:64]] if query.strip() else ["a"]

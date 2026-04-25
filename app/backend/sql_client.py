@@ -14,7 +14,12 @@ def _server_hostname() -> str:
 
 def run_sql(sql: str) -> list[dict[str, Any]]:
     if config.USE_LOCAL_FALLBACK:
-        raise RuntimeError("run_sql requires Databricks credentials (USE_LOCAL_FALLBACK is on).")
+        raise RuntimeError("run_sql is disabled (USE_LOCAL_FALLBACK is on).")
+    if not config.SQL_WAREHOUSE_CONFIGURED:
+        raise RuntimeError(
+            "DATABRICKS_HTTP_PATH is not set — configure a SQL warehouse path for curated SQL, "
+            "or omit it and use Vector Search–only RAG."
+        )
     from databricks.sql import connect
 
     conn = connect(
