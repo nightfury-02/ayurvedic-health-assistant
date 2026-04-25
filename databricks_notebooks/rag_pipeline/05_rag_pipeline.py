@@ -55,7 +55,20 @@ def retrieve_context(query: str, k: int = TOP_K):
         columns=["chunk_text", "source_file", "page_number"],
         num_results=k,
     )
-    return response.get("result", {}).get("data_array", [])
+    rows = response.get("result", {}).get("data_array", [])
+    print(f"[DEBUG][RAG] Retrieved rows: {len(rows)}")
+    if rows:
+        preview = [
+            {
+                "source_file": r[1] if len(r) > 1 else None,
+                "page_number": r[2] if len(r) > 2 else None,
+                "score": r[-1] if len(r) > 0 else None,
+                "chunk_preview": (r[0][:180] + "...") if len(r) > 0 and r[0] and len(r[0]) > 180 else (r[0] if len(r) > 0 else ""),
+            }
+            for r in rows[:3]
+        ]
+        print(f"[DEBUG][RAG] Top retrieval preview: {preview}")
+    return rows
 
 
 def build_prompt(question: str, rows):
@@ -69,10 +82,15 @@ def build_prompt(question: str, rows):
         )
     context_block = "\n\n".join(context_lines)
     return (
-        "Answer the question using the context below:\n\n"
+        "You are an Ayurvedic health assistant.\n"
+        "Use the retrieved context as your first and strongest source of truth.\n"
+        "If the context is weak, incomplete, or partially relevant, provide the best possible answer using reliable general Ayurvedic knowledge.\n"
+        "When you use knowledge not explicitly present in retrieved context, clearly label it as general knowledge.\n"
+        "Avoid hallucinations and avoid making diagnosis claims.\n\n"
+        "Retrieved context:\n\n"
         f"{context_block}\n\n"
         f"Question: {question}\n"
-        "If context is insufficient, say so clearly."
+        "Respond in 4-8 concise bullet points and include practical guidance where possible."
     )
 
 

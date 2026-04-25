@@ -38,12 +38,10 @@ def clean_text(text: str) -> str:
 
 def clean_pdf_text(text: str) -> str:
     """
-    Clean messy PDF text for embedding quality:
+    Light-touch cleaning to preserve semantic content:
     - remove URLs
-    - remove citation patterns: (1), [1], [1,2]
-    - remove numbered references like "1)"
-    - remove non-ASCII text (English-dominant fallback)
-    - remove repeated symbols/artifacts
+    - soften citation noise
+    - normalize repeated punctuation artifacts
     - normalize whitespace
     """
     if text is None:
@@ -53,10 +51,9 @@ def clean_pdf_text(text: str) -> str:
     cleaned = re.sub(r"https?://\S+|www\.\S+", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\(\s*\d{1,4}\s*\)", " ", cleaned)
     cleaned = re.sub(r"\[\s*\d{1,4}(?:\s*,\s*\d{1,4})*\s*\]", " ", cleaned)
-    cleaned = re.sub(r"(?:(?<=\s)|^)\d+\)\s*", " ", cleaned)
-    cleaned = re.sub(r"[^\x00-\x7F]+", " ", cleaned)
+    cleaned = re.sub(r"(?:(?<=\s)|^)\d+\)\s*", " ", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"([^\w\s])\1{2,}", r"\1", cleaned)
-    cleaned = re.sub(r"[_\-=:]{3,}", " ", cleaned)
+    cleaned = re.sub(r"[_\-=:]{4,}", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
 
@@ -66,22 +63,12 @@ def _is_useless_line(line: str) -> bool:
     if not lowered:
         return True
 
-    noisy_keywords = [
-        "references",
-        "bibliography",
-        "journal",
-        "doi",
-        "http",
-        "www",
-        "pg.no",
-        "edition",
-        "vol.",
-        "volume",
-        "issue",
-        "citation",
-        "issn",
-    ]
-    if any(k in lowered for k in noisy_keywords):
+    # Keep this intentionally conservative: remove only clear metadata/noise rows.
+    if lowered in {"references", "bibliography"}:
+        return True
+    if lowered.startswith("doi:"):
+        return True
+    if "http" in lowered or "www" in lowered:
         return True
 
     # Lines that are mostly citation artifacts.
@@ -106,7 +93,8 @@ def structure_text(text: str, source_file: str = "", page_number: int = None) ->
     """
     lines = [ln.strip() for ln in str(text or "").splitlines()]
     useful_lines = [ln for ln in lines if not _is_useless_line(ln)]
-    filtered = clean_pdf_text(" ".join(useful_lines))
+    # If conservative line filtering still collapses content, fall back to all lines.
+    filtered = clean_pdf_text(" ".join(useful_lines) if useful_lines else " ".join(lines))
     if not filtered:
         return ""
 
@@ -125,6 +113,17 @@ def structure_text(text: str, source_file: str = "", page_number: int = None) ->
 
     if not uses:
         uses = " ".join(filtered.split()[:40]).strip()
+
+    extraction_hit_count = sum(
+        1 for value in [ingredient, botanical, characteristics, uses, kitchen_use, ayurvedic_use, remedies] if value
+    )
+    if extraction_hit_count <= 2:
+        # Regex extraction is fragile for free-form PDFs; do not collapse to synthetic fields.
+        return clean_text(
+            f"Source File: {source_file or 'unknown_file'} | "
+            f"Page Number: {str(page_number) if page_number is not None else 'unknown'} | "
+            f"Content: {filtered}"
+        )
 
     parts = [
         f"Ingredient: {ingredient}" if ingredient else "Ingredient: Unknown",
@@ -176,6 +175,10 @@ def translate_to_english_placeholder(text: str) -> str:
     return text
 
 
+def sanitize_column_name(column_name: str) -> str:
+    return re.sub(r"\s+", "_", str(column_name or "").strip().lower())
+
+
 chunker_udf = F.udf(chunk_text, T.ArrayType(T.StringType()))
 clean_text_udf = F.udf(clean_text, T.StringType())
 clean_pdf_text_udf = F.udf(clean_pdf_text, T.StringType())
@@ -214,17 +217,9 @@ if not csv_files and not pdf_files:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Structured text creation for CSV rows
+# MAGIC ## Structured text creation for CSV rows (dynamic all-columns)
 
 # COMMAND ----------
-
-def choose_column(candidates: List[str], available: List[str]) -> str:
-    available_norm = {c.lower().strip() for c in available}
-    for candidate in candidates:
-        if candidate in available_norm:
-            return candidate
-    return ""
-
 
 csv_base_df = None
 if csv_files:
@@ -237,27 +232,22 @@ if csv_files:
         .withColumn("source_file", F.col("_metadata.file_path"))
     )
 
-    available_cols = [c.lower().strip() for c in csv_base_df.columns]
-    col_lookup = {c.lower().strip(): c for c in csv_base_df.columns}
+    metadata_like_cols = {"source_file", "_metadata"}
+    csv_content_cols = [
+        c for c in csv_base_df.columns if sanitize_column_name(c) not in metadata_like_cols and c != "source_file"
+    ]
+    if not csv_content_cols:
+        raise ValueError("CSV files detected but no content columns are available for ingestion.")
 
-    condition_col = choose_column(["condition", "disease", "ailment", "problem"], available_cols)
-    diet_col = choose_column(["diet", "diet_recommendation", "food", "ahara"], available_cols)
-    yoga_col = choose_column(["yoga", "asana", "exercise", "lifestyle"], available_cols)
-    medical_col = choose_column(["medical", "medicine", "treatment", "remedy"], available_cols)
-    prevention_col = choose_column(["prevention", "preventive", "care", "tips"], available_cols)
-    prognosis_col = choose_column(["prognosis", "outlook", "recovery"], available_cols)
-
-    def col_or_empty(column_name: str):
-        if not column_name:
-            return F.lit(None).cast("string")
-        return F.col(col_lookup[column_name]).cast("string")
-
-    condition_expr = clean_text_udf(col_or_empty(condition_col))
-    diet_expr = clean_text_udf(col_or_empty(diet_col))
-    yoga_expr = clean_text_udf(col_or_empty(yoga_col))
-    medical_expr = clean_text_udf(col_or_empty(medical_col))
-    prevention_expr = clean_text_udf(col_or_empty(prevention_col))
-    prognosis_expr = clean_text_udf(col_or_empty(prognosis_col))
+    print(f"[DEBUG][CSV] Detected columns ({len(csv_content_cols)}): {csv_content_cols}")
+    rich_parts = [
+        F.when(
+            F.trim(clean_text_udf(F.col(c).cast("string"))) != "",
+            F.concat(F.lit(f"{c}: "), clean_text_udf(F.col(c).cast("string"))),
+        )
+        for c in csv_content_cols
+    ]
+    summary_parts = [clean_text_udf(F.col(c).cast("string")) for c in csv_content_cols]
 
     csv_structured_df = (
         csv_base_df.withColumn("source_type", F.lit("csv"))
@@ -266,12 +256,8 @@ if csv_files:
             "parts",
             F.array(
                 F.lit("Source: csv"),
-                F.when(F.trim(condition_expr) != "", F.concat(F.lit("Condition: "), condition_expr)),
-                F.when(F.trim(diet_expr) != "", F.concat(F.lit("Diet: "), diet_expr)),
-                F.when(F.trim(yoga_expr) != "", F.concat(F.lit("Yoga: "), yoga_expr)),
-                F.when(F.trim(medical_expr) != "", F.concat(F.lit("Medical: "), medical_expr)),
-                F.when(F.trim(prevention_expr) != "", F.concat(F.lit("Prevention: "), prevention_expr)),
-                F.when(F.trim(prognosis_expr) != "", F.concat(F.lit("Prognosis: "), prognosis_expr)),
+                F.concat(F.lit("Case Summary: "), F.concat_ws(". ", *summary_parts)),
+                *rich_parts,
                 F.concat(F.lit("Source File: "), F.coalesce(F.col("source_file"), F.lit("unknown_file"))),
             ),
         )
@@ -290,6 +276,11 @@ else:
         [],
         "row_id string, raw_text string, source_type string, source_file string, page_number int",
     )
+
+print(f"[DEBUG] CSV files discovered: {len(csv_files)}")
+if csv_files:
+    print("[DEBUG] Sample CSV raw_text:")
+    display(csv_structured_df.select("raw_text", "source_file").limit(3))
 
 # COMMAND ----------
 
@@ -357,18 +348,43 @@ for pdf_path in pdf_files:
 
 if pdf_rows:
     pdf_pages_df = spark.createDataFrame(pdf_rows)
+    print(f"[DEBUG][PDF] Extracted page rows: {pdf_pages_df.count()}")
+    print("[DEBUG][PDF] Sample extracted page_text (raw):")
+    display(pdf_pages_df.select("source_file", "page_number", "page_text").limit(2))
     pdf_structured_df = (
         pdf_pages_df.withColumn("source_type", F.lit("pdf"))
-        .withColumn("page_text", clean_pdf_text_udf(F.col("page_text")))
-        .filter(F.length(F.trim(F.col("page_text"))) > 0)
+        .withColumn("clean_page_text", clean_pdf_text_udf(F.col("page_text")))
+        .filter(F.length(F.trim(F.col("clean_page_text"))) > 0)
         .withColumn(
-            "raw_text",
+            "structured_text",
             structure_text_udf(
-                F.col("page_text"),
+                F.col("clean_page_text"),
                 F.col("source_file"),
                 F.col("page_number"),
             ),
         )
+        .withColumn(
+            "raw_text",
+            F.when(
+                F.length(F.trim(F.col("structured_text"))) > 0,
+                F.concat(
+                    F.col("structured_text"),
+                    F.lit(" | Full Page Text: "),
+                    F.col("clean_page_text"),
+                ),
+            ).otherwise(F.col("clean_page_text")),
+        )
+        .withColumn(
+            "raw_text",
+            F.concat(
+                F.lit("Source: pdf | Source File: "),
+                F.coalesce(F.col("source_file"), F.lit("unknown_file")),
+                F.lit(" | Page Number: "),
+                F.coalesce(F.col("page_number").cast("string"), F.lit("unknown")),
+                F.lit(" | "),
+                F.col("raw_text"),
+            ),
+        )        
         .filter(F.length(F.trim(F.col("raw_text"))) > 0)
         .select(
             F.expr("uuid()").alias("row_id"),
@@ -386,6 +402,7 @@ else:
 
 # Unified pipeline: include both CSV and PDF records.
 base_df = csv_structured_df.unionByName(pdf_structured_df, allowMissingColumns=True)
+print(f"[DEBUG] Structured row count (CSV + PDF): {base_df.count()}")
 if base_df.count() == 0:
     raise ValueError("No structured records built from CSV/PDF inputs.")
 
@@ -415,16 +432,9 @@ chunked_df = (
 
 filtered_chunked_df = (
     chunked_df.withColumn("chunk_word_count", F.size(F.split(F.trim(F.col("chunk_text")), r"\s+")))
-    .withColumn("alpha_chars", F.length(F.regexp_replace(F.col("chunk_text"), r"[^A-Za-z]", "")))
-    .withColumn("visible_chars", F.length(F.regexp_replace(F.col("chunk_text"), r"\s+", "")))
-    .withColumn(
-        "alpha_ratio",
-        F.when(F.col("visible_chars") > 0, F.col("alpha_chars") / F.col("visible_chars")).otherwise(F.lit(0.0)),
-    )
-    .filter(F.col("chunk_word_count") >= 10)
-    .filter(F.col("alpha_ratio") >= 0.2)
+    .filter(F.col("chunk_word_count") >= 5)
     .filter(~F.lower(F.col("chunk_text")).rlike(r"^\s*(references|bibliography|doi|journal|www|http)\s*$"))
-    .drop("chunk_word_count", "alpha_chars", "visible_chars", "alpha_ratio")
+    .drop("chunk_word_count")
 )
 
 final_df = (
@@ -455,6 +465,11 @@ final_df = (
 
 if final_df.count() == 0:
     raise ValueError("No chunks produced after context-aware preprocessing.")
+
+print(f"[DEBUG] Chunked rows before filtering: {chunked_df.count()}")
+print(f"[DEBUG] Final chunk count after filtering: {final_df.count()}")
+print("[DEBUG] Sample final chunks:")
+display(final_df.select("chunk_text", "source_type", "source_file", "page_number").limit(5))
 
 # COMMAND ----------
 

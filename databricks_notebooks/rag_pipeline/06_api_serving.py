@@ -77,6 +77,9 @@ def retrieve(question: str, top_k: int) -> List[Dict[str, Any]]:
                 "score": r[-1] if len(r) > 0 else None,
             }
         )
+    print(f"[DEBUG][API] Retrieved {len(out)} contexts for question: {question}")
+    if out:
+        print(f"[DEBUG][API] Top context scores: {[c.get('score') for c in out[:5]]}")
     return out
 
 
@@ -88,10 +91,14 @@ def build_prompt(question: str, contexts: List[Dict[str, Any]]) -> str:
         ]
     )
     return (
-        "Answer the question using the context below:\n\n"
+        "You are an Ayurvedic health assistant.\n"
+        "Prioritize retrieved context when answering.\n"
+        "If retrieved context is insufficient, provide a best-effort answer using reliable general Ayurvedic knowledge and explicitly mark that portion as general knowledge.\n"
+        "Do not invent citations; only cite the provided sources.\n\n"
+        "Retrieved context:\n\n"
         f"{context_block}\n\n"
         f"Question: {question}\n"
-        "If context is insufficient, mention that clearly."
+        "Answer clearly and include concise practical guidance."
     )
 
 

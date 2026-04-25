@@ -45,9 +45,9 @@ chunk_text_by_words = _import_shared_chunker()
 
 
 def text_chunker(text: str):
-    return chunk_text_by_words(
-        text, chunk_size_words=CHUNK_SIZE_WORDS, overlap_words=CHUNK_OVERLAP_WORDS
-    )
+    # For CSV rows, we treat the entire row (all columns combined) as a single chunk.
+    # Splitting structured rows causes column context to be lost in retrieval.
+    return [text]
 
 
 chunker_udf = F.udf(text_chunker, "array<string>")
